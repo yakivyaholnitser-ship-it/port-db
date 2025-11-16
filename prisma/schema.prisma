@@ -1,0 +1,54 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model PortEntry {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+
+  // Core identification
+  port      String
+  country   String?   // optional
+  terminal  String
+  operation String    // "Load" | "Discharge" | "Bunker"
+
+  // Cargo info
+  cargo        String?
+  stowFactor   String?  // raw text "45–47 CFT/MT" etc
+  quantityInfo String?  // e.g. "typical 30,800 MT"
+
+  // Dimensions / draught (store as raw strings for now – real-world data is messy)
+  waterDensity       String?  // e.g. "1.025", "1.015–1.021"
+  maxDraftMeters     String?  // e.g. "11.88 m", "39 ft MLLW"
+  maxDraftNotes      String?  // any extra comments
+  loaMeters          String?  // e.g. "225 m"
+  beamMeters         String?  // e.g. "32.3 m"
+  maxDwtMt           String?  // e.g. "72,000 MT"
+  airDraftMeters     String?  // e.g. "20.4 m"
+  minFreeboardMeters String?  // e.g. "4.88 m"
+
+  // Rates (also as strings – “12,000 MT/day”, ranges, etc.)
+  loadRatePerDayMt      String?
+  dischargeRatePerDayMt String?
+
+  // Ops & costs
+  agents            String?
+  costDockage       String?
+  costPilotage      String?
+  costTowage        String?
+  costTotalEstimate String?
+
+  bunkeringNotes      String?
+  cleaningNotes       String?
+  transitPsNotes      String?
+  sulphurLimit        String?
+  specialRestrictions String? // "min 2000 MT per hold", etc
+
+  // Full raw text for reference & future re-parsing
+  rawText String
+}
