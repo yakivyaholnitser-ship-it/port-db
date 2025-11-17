@@ -1,198 +1,115 @@
-import { NextRequest, NextResponse } from "next/server";
+// app/api/ingest/route.ts
+import { NextResponse } from "next/server";
 import OpenAI from "openai";
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "@/lib/prisma";
 
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY!,
 });
 
-type ParsedPortInfo = {
-  port?: string;
-  country?: string;
-  terminal?: string;
-  operation?: string; // Load / Discharge / Bunker
+// Жёсткий системный промпт: модель всегда должна вернуть чистый JSON
+const SYSTEM_PROMPT = `
+You are a strict JSON parser for port / terminal operational descriptions.
 
-  cargo?: string;
-  stowFactor?: string;
-  quantityInfo?: string;
+You MUST respond with a single valid JSON object and NOTHING else (no markdown, no extra text).
+Use exactly this shape (TypeScript-like):
 
-  waterDensity?: string;
-  maxDraftMeters?: string;
-  maxDraftNotes?: string;
-  loaMeters?: string;
-  beamMeters?: string;
-  maxDwtMt?: string;
-  airDraftMeters?: string;
-  minFreeboardMeters?: string;
+interface PortEntry {
+  port: string;
+  country?: string | null;
+  terminal: string;
+  operation: "Load" | "Discharge" | "Bunker";
 
-  loadRatePerDayMt?: string;
-  dischargeRatePerDayMt?: string;
+  cargo?: string | null;
+  stowFactor?: string | null;
+  quantityInfo?: string | null;
 
-  agents?: string;
-  costDockage?: string;
-  costPilotage?: string;
-  costTowage?: string;
-  costTotalEstimate?: string;
+  waterDensity?: string | null;
+  maxDraftMeters?: string | null;
+  maxDraftNotes?: string | null;
+  loaMeters?: string | null;
+  beamMeters?: string | null;
+  maxDwtMt?: string | null;
+  airDraftMeters?: string | null;
+  minFreeboardMeters?: string | null;
 
-  bunkeringNotes?: string;
-  cleaningNotes?: string;
-  transitPsNotes?: string;
-  sulphurLimit?: string;
+  loadRatePerDayMt?: string | null;
+  dischargeRatePerDayMt?: string | null;
 
-  specialRestrictions?: string;
-};
+  agents?: string | null;
+  costDockage?: string | null;
+  costPilotage?: string | null;
+  costTowage?: string | null;
+  costTotalEstimate?: string | null;
 
-async function extractTextFromRequest(req: NextRequest): Promise<string> {
-  const contentType = req.headers.get("content-type") || "";
+  bunkeringNotes?: string | null;
+  cleaningNotes?: string | null;
+  transitPsNotes?: string | null;
+  sulphurLimit?: string | null;
 
-  // 1) Если пришёл JSON
-  if (contentType.includes("application/json")) {
-    try {
-      const body = await req.json();
-
-      // Вдруг кто-то шлёт просто строку в JSON
-      if (typeof body === "string") {
-        return body;
-      }
-
-      if (body && typeof body.text === "string") {
-        return body.text;
-      }
-
-      // На всякий случай пробуем другие популярные ключи
-      if (body && typeof body.content === "string") {
-        return body.content;
-      }
-
-      console.error("INGEST: JSON без text/content поля:", body);
-      return "";
-    } catch (e) {
-      console.error("INGEST: ошибка парсинга JSON тела:", e);
-      return "";
-    }
-  }
-
-  // 2) Всё остальное — читаем как сырой текст
-  try {
-    const text = await req.text();
-    return text;
-  } catch (e) {
-    console.error("INGEST: ошибка чтения сырое тело:", e);
-    return "";
-  }
+  specialRestrictions?: string | null;
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    const text = (await extractTextFromRequest(req)).trim();
-
-    if (!text) {
-      console.error("INGEST: пустой или некорректный text в запросе");
-      return NextResponse.json(
-        {
-          error:
-            "Missing required fields: text is mandatory and must be non-empty.",
-        },
-        { status: 400 }
-      );
-    }
-
-    const systemPrompt = `
-Ты помощник по морским портам. Получаешь большой текст (инфа от агентов по порту/терминалу).
-Твоя задача — вернуть ОДИН JSON-объект строго такого вида:
-
-{
-  "port": "string (порт, город/порт, если есть)",
-  "country": "string или null",
-  "terminal": "string или null",
-  "operation": "Load | Discharge | Bunker",
-
-  "cargo": "string или null",
-  "stowFactor": "string или null",
-  "quantityInfo": "string или null",
-
-  "waterDensity": "string или null",
-  "maxDraftMeters": "string или null",
-  "maxDraftNotes": "string или null",
-  "loaMeters": "string или null",
-  "beamMeters": "string или null",
-  "maxDwtMt": "string или null",
-  "airDraftMeters": "string или null",
-  "minFreeboardMeters": "string или null",
-
-  "loadRatePerDayMt": "string или null",
-  "dischargeRatePerDayMt": "string или null",
-
-  "agents": "string или null",
-  "costDockage": "string или null",
-  "costPilotage": "string или null",
-  "costTowage": "string или null",
-  "costTotalEstimate": "string или null",
-
-  "bunkeringNotes": "string или null",
-  "cleaningNotes": "string или null",
-  "transitPsNotes": "string или null",
-  "sulphurLimit": "string или null",
-
-  "specialRestrictions": "string или null"
-}
-
-Только JSON, без комментариев, без пояснений, без markdown.
-Если каких-то данных нет — ставь null.
+Parsing rules:
+- Decide operation: "Load", "Discharge" or "Bunker" from context.
+- Keep numeric values as strings with units if present (e.g. "15.24 m", "24000 MT/day").
+- If you don't know a value, use null.
+- Do NOT wrap the JSON in backticks or markdown.
+- Final output MUST be valid JSON, starting with { and ending with }.
 `;
 
-    const response = await client.responses.create({
+export async function POST(req: Request) {
+  try {
+    let body: unknown;
+
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json(
+        { error: "Body must be valid JSON with field 'text'." },
+        { status: 400 },
+      );
+    }
+
+    const { text } = (body ?? {}) as { text?: string };
+
+    if (!text || typeof text !== "string" || !text.trim()) {
+      return NextResponse.json(
+        { error: "Missing required field 'text' (non-empty string)." },
+        { status: 400 },
+      );
+    }
+
+    // ⚠️ Здесь НЕТ response_format и НЕТ Responses API
+    const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
-      input: text,
-      instructions: systemPrompt,
-      response_format: {
-        type: "json_object",
-      },
+      temperature: 0,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: text },
+      ],
     });
 
-    const outputPart = response.output[0];
-    if (outputPart.type !== "message") {
-      console.error("INGEST: неожиданный формат ответа OpenAI:", response);
+    const rawContent = completion.choices[0]?.message?.content;
+
+    if (!rawContent) {
       return NextResponse.json(
-        { error: "Unexpected model response format" },
-        { status: 500 }
+        { error: "Model returned empty content." },
+        { status: 500 },
       );
     }
 
-    const rawJson =
-      outputPart.message.content[0]?.type === "output_text"
-        ? outputPart.message.content[0].text
-        : "";
-
-    if (!rawJson) {
-      console.error("INGEST: пустой текст в ответе модели:", response);
-      return NextResponse.json(
-        { error: "Empty model response" },
-        { status: 500 }
-      );
-    }
-
-    let parsed: ParsedPortInfo;
+    let parsed: any;
     try {
-      parsed = JSON.parse(rawJson);
+      parsed = JSON.parse(rawContent);
     } catch (e) {
-      console.error("INGEST: ошибка JSON.parse ответа модели:", rawJson, e);
-      return NextResponse.json(
-        { error: "Failed to parse model JSON" },
-        { status: 500 }
-      );
-    }
-
-    if (!parsed.operation || !parsed.terminal) {
-      console.error("INGEST: model did not return required fields:", parsed);
+      console.error("INGEST JSON PARSE ERROR:", rawContent, e);
       return NextResponse.json(
         {
           error:
-            "Model did not return mandatory fields (operation, terminal).",
+            "Failed to parse model JSON response. Check server logs for details.",
         },
-        { status: 400 }
+        { status: 500 },
       );
     }
 
@@ -201,7 +118,7 @@ export async function POST(req: NextRequest) {
         port: parsed.port ?? "UNKNOWN_PORT",
         country: parsed.country ?? null,
         terminal: parsed.terminal ?? "UNKNOWN_TERMINAL",
-        operation: parsed.operation ?? "UNKNOWN",
+        operation: parsed.operation ?? "Load",
 
         cargo: parsed.cargo ?? null,
         stowFactor: parsed.stowFactor ?? null,
@@ -236,14 +153,12 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    return NextResponse.json({ ok: true, entry }, { status: 200 });
-  } catch (err: any) {
+    return NextResponse.json({ ok: true, entry });
+  } catch (err) {
     console.error("INGEST FATAL ERROR:", err);
     return NextResponse.json(
-      {
-        error: "Internal server error while ingesting. See server logs.",
-      },
-      { status: 500 }
+      { error: "Internal server error while ingesting. See server logs." },
+      { status: 500 },
     );
   }
 }
