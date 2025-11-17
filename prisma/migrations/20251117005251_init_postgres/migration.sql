@@ -1,7 +1,7 @@
 -- CreateTable
 CREATE TABLE "PortEntry" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "id" SERIAL NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "port" TEXT NOT NULL,
     "country" TEXT,
     "terminal" TEXT NOT NULL,
@@ -10,15 +10,15 @@ CREATE TABLE "PortEntry" (
     "stowFactor" TEXT,
     "quantityInfo" TEXT,
     "waterDensity" TEXT,
-    "maxDraftMeters" REAL,
+    "maxDraftMeters" TEXT,
     "maxDraftNotes" TEXT,
-    "loaMeters" REAL,
-    "beamMeters" REAL,
-    "maxDwtMt" REAL,
-    "airDraftMeters" REAL,
-    "minFreeboardMeters" REAL,
-    "loadRatePerDayMt" REAL,
-    "dischargeRatePerDayMt" REAL,
+    "loaMeters" TEXT,
+    "beamMeters" TEXT,
+    "maxDwtMt" TEXT,
+    "airDraftMeters" TEXT,
+    "minFreeboardMeters" TEXT,
+    "loadRatePerDayMt" TEXT,
+    "dischargeRatePerDayMt" TEXT,
     "agents" TEXT,
     "costDockage" TEXT,
     "costPilotage" TEXT,
@@ -29,5 +29,7 @@ CREATE TABLE "PortEntry" (
     "transitPsNotes" TEXT,
     "sulphurLimit" TEXT,
     "specialRestrictions" TEXT,
-    "rawText" TEXT NOT NULL
+    "rawText" TEXT NOT NULL,
+
+    CONSTRAINT "PortEntry_pkey" PRIMARY KEY ("id")
 );
