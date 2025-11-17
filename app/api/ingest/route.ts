@@ -1,164 +1,239 @@
-// app/api/ingest/route.ts
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { prisma } from "@/lib/prisma";
 
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Жёсткий системный промпт: модель всегда должна вернуть чистый JSON
-const SYSTEM_PROMPT = `
-You are a strict JSON parser for port / terminal operational descriptions.
-
-You MUST respond with a single valid JSON object and NOTHING else (no markdown, no extra text).
-Use exactly this shape (TypeScript-like):
-
-interface PortEntry {
-  port: string;
-  country?: string | null;
-  terminal: string;
-  operation: "Load" | "Discharge" | "Bunker";
-
-  cargo?: string | null;
-  stowFactor?: string | null;
-  quantityInfo?: string | null;
-
-  waterDensity?: string | null;
-  maxDraftMeters?: string | null;
-  maxDraftNotes?: string | null;
-  loaMeters?: string | null;
-  beamMeters?: string | null;
-  maxDwtMt?: string | null;
-  airDraftMeters?: string | null;
-  minFreeboardMeters?: string | null;
-
-  loadRatePerDayMt?: string | null;
-  dischargeRatePerDayMt?: string | null;
-
-  agents?: string | null;
-  costDockage?: string | null;
-  costPilotage?: string | null;
-  costTowage?: string | null;
-  costTotalEstimate?: string | null;
-
-  bunkeringNotes?: string | null;
-  cleaningNotes?: string | null;
-  transitPsNotes?: string | null;
-  sulphurLimit?: string | null;
-
-  specialRestrictions?: string | null;
+// Страхуемся от undefined / слишком длинных строк
+function safeString(val: unknown): string | null {
+  if (val === undefined || val === null) return null;
+  return String(val).slice(0, 191);
 }
-
-Parsing rules:
-- Decide operation: "Load", "Discharge" or "Bunker" from context.
-- Keep numeric values as strings with units if present (e.g. "15.24 m", "24000 MT/day").
-- If you don't know a value, use null.
-- Do NOT wrap the JSON in backticks or markdown.
-- Final output MUST be valid JSON, starting with { and ending with }.
-`;
 
 export async function POST(req: Request) {
   try {
-    let body: unknown;
+    // Поддерживаем оба варианта:
+    // 1) фронтенд отправляет JSON { text: "..." }
+    // 2) Make/HTTP отправляет просто "сырой" текст
+    const rawBody = await req.text();
+    let body: any;
 
     try {
-      body = await req.json();
+      body = JSON.parse(rawBody);
     } catch {
+      // Если это не JSON — считаем, что это уже чистый текст
+      body = { text: rawBody };
+    }
+
+    const text =
+      typeof body.text === "string" ? body.text.trim() : "";
+
+    if (!text) {
+      console.error("INGEST: missing required field 'text' in body", body);
       return NextResponse.json(
-        { error: "Body must be valid JSON with field 'text'." },
-        { status: 400 },
+        {
+          success: false,
+          error:
+            "Missing required fields: text, port, terminal, operation are mandatory.",
+        },
+        { status: 400 }
       );
     }
 
-    const { text } = (body ?? {}) as { text?: string };
+    const systemPrompt = `
+Ты — помощник по портовым данным. На входе ты получаешь сырую текстовую порт-инфу
+(терминал, ограничения, ставки, груз, плотность воды, осадки, агенты, бункера, очистка и т.п.).
 
-    if (!text || typeof text !== "string" || !text.trim()) {
-      return NextResponse.json(
-        { error: "Missing required field 'text' (non-empty string)." },
-        { status: 400 },
-      );
-    }
+Твоя задача — вернуть ЧИСТЫЙ JSON (БЕЗ комментариев, БЕЗ лишнего текста),
+строго в следующей структуре:
 
-    // ⚠️ Здесь НЕТ response_format и НЕТ Responses API
+{
+  "port": "Long Beach",
+  "country": "USA",
+  "terminal": "LB214",
+  "operation": "Load",          // "Load" | "Discharge" | "Bunker"
+  "cargo": "Green Delayed Petcoke",
+  "stowFactor": "43/44",
+  "quantityInfo": "обычно 30-35k MT",
+
+  "waterDensity": "1.025",
+  "maxDraftMeters": "12.20",    // ВСЕ ЧИСЛА — ТОЖЕ СТРОКА
+  "maxDraftNotes": "40 ft MLLW",
+  "loaMeters": "225",
+  "beamMeters": "32.3",
+  "maxDwtMt": "72000",
+  "airDraftMeters": "66",
+  "minFreeboardMeters": "4.88",
+
+  "loadRatePerDayMt": "24000",
+  "dischargeRatePerDayMt": "9000",
+
+  "agents": "Transmarine",
+  "costDockage": "Dockage Charges based on LOA ...",
+  "costPilotage": "abt 4k-6k",
+  "costTowage": "if known, иначе null",
+  "costTotalEstimate": "abt 25k - 40k",
+
+  "bunkeringNotes": "Inner Anchorage or berth; <0.1% sulphur",
+  "cleaningNotes": "Cleaning only at anchorage",
+  "transitPsNotes": "Transit time 1–2 hours from pilot station",
+  "sulphurLimit": "<0.1% sulphur",
+
+  "specialRestrictions": "min 2000 MT remaining in any hold"
+}
+
+ОБЯЗАТЕЛЬНЫЕ поля: port, terminal, operation.
+Если каких-то данных в тексте нет — ставь null.
+
+ВСЕ численные значения (осадка, LOA, beam, DWT, суточные нормы и т.д.)
+ВОЗВРАЩАЙ СТРОКАМИ, НЕ ЧИСЛАМИ.
+`;
+
+    // ⚠️ Возвращаемся на chat.completions с JSON-форматом
     const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
-      temperature: 0,
+      response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: systemPrompt },
         { role: "user", content: text },
       ],
     });
 
-    const rawContent = completion.choices[0]?.message?.content;
-
-    if (!rawContent) {
+    const content = completion.choices[0]?.message?.content;
+    if (!content) {
+      console.error("Empty content from OpenAI:", completion);
       return NextResponse.json(
-        { error: "Model returned empty content." },
-        { status: 500 },
+        {
+          success: false,
+          error:
+            "Модель вернула пустой ответ. Попробуй ещё раз с другим текстом.",
+        },
+        { status: 500 }
       );
     }
 
     let parsed: any;
     try {
-      parsed = JSON.parse(rawContent);
+      parsed = JSON.parse(content);
     } catch (e) {
-      console.error("INGEST JSON PARSE ERROR:", rawContent, e);
+      console.error("JSON parse error from AI:", e, content);
       return NextResponse.json(
         {
+          success: false,
           error:
-            "Failed to parse model JSON response. Check server logs for details.",
+            "Не удалось разобрать JSON от модели. Попробуй ещё раз или сократи текст.",
         },
-        { status: 500 },
+        { status: 500 }
       );
     }
 
+    // Определяем operation максимально надёжно
+    let operation: "Load" | "Discharge" | "Bunker" = "Load";
+
+    if (typeof parsed.operation === "string") {
+      const op = parsed.operation.toLowerCase();
+      if (op.startsWith("dis")) operation = "Discharge";
+      else if (op.startsWith("bun")) operation = "Bunker";
+      else operation = "Load";
+    } else {
+      const lower = text.toLowerCase();
+      if (lower.includes("discharg")) operation = "Discharge";
+      else if (lower.includes("unload")) operation = "Discharge";
+      else if (lower.includes("bunker")) operation = "Bunker";
+    }
+
+    // Создаём запись в БД. Все "числовые" поля — тоже строки (см. schema.prisma).
     const entry = await prisma.portEntry.create({
       data: {
-        port: parsed.port ?? "UNKNOWN_PORT",
-        country: parsed.country ?? null,
-        terminal: parsed.terminal ?? "UNKNOWN_TERMINAL",
-        operation: parsed.operation ?? "Load",
+        port: safeString(parsed.port) ?? "UNKNOWN_PORT",
+        country: safeString(parsed.country),
 
-        cargo: parsed.cargo ?? null,
-        stowFactor: parsed.stowFactor ?? null,
-        quantityInfo: parsed.quantityInfo ?? null,
+        terminal: safeString(parsed.terminal) || "UNKNOWN_TERMINAL",
+        operation,
 
-        waterDensity: parsed.waterDensity ?? null,
-        maxDraftMeters: parsed.maxDraftMeters ?? null,
-        maxDraftNotes: parsed.maxDraftNotes ?? null,
-        loaMeters: parsed.loaMeters ?? null,
-        beamMeters: parsed.beamMeters ?? null,
-        maxDwtMt: parsed.maxDwtMt ?? null,
-        airDraftMeters: parsed.airDraftMeters ?? null,
-        minFreeboardMeters: parsed.minFreeboardMeters ?? null,
+        cargo: safeString(parsed.cargo),
+        stowFactor: safeString(parsed.stowFactor),
+        quantityInfo: safeString(parsed.quantityInfo),
 
-        loadRatePerDayMt: parsed.loadRatePerDayMt ?? null,
-        dischargeRatePerDayMt: parsed.dischargeRatePerDayMt ?? null,
+        waterDensity: safeString(parsed.waterDensity),
+        maxDraftMeters: safeString(parsed.maxDraftMeters),
+        maxDraftNotes: safeString(parsed.maxDraftNotes),
+        loaMeters: safeString(parsed.loaMeters),
+        beamMeters: safeString(parsed.beamMeters),
+        maxDwtMt: safeString(parsed.maxDwtMt),
+        airDraftMeters: safeString(parsed.airDraftMeters),
+        minFreeboardMeters: safeString(parsed.minFreeboardMeters),
 
-        agents: parsed.agents ?? null,
-        costDockage: parsed.costDockage ?? null,
-        costPilotage: parsed.costPilotage ?? null,
-        costTowage: parsed.costTowage ?? null,
-        costTotalEstimate: parsed.costTotalEstimate ?? null,
+        loadRatePerDayMt: safeString(parsed.loadRatePerDayMt),
+        dischargeRatePerDayMt: safeString(parsed.dischargeRatePerDayMt),
 
-        bunkeringNotes: parsed.bunkeringNotes ?? null,
-        cleaningNotes: parsed.cleaningNotes ?? null,
-        transitPsNotes: parsed.transitPsNotes ?? null,
-        sulphurLimit: parsed.sulphurLimit ?? null,
+        agents: safeString(parsed.agents),
+        costDockage: safeString(parsed.costDockage),
+        costPilotage: safeString(parsed.costPilotage),
+        costTowage: safeString(parsed.costTowage),
+        costTotalEstimate: safeString(parsed.costTotalEstimate),
 
-        specialRestrictions: parsed.specialRestrictions ?? null,
+        bunkeringNotes: safeString(parsed.bunkeringNotes),
+        cleaningNotes: safeString(parsed.cleaningNotes),
+        transitPsNotes: safeString(parsed.transitPsNotes),
+        sulphurLimit: safeString(parsed.sulphurLimit),
+
+        specialRestrictions: safeString(parsed.specialRestrictions),
 
         rawText: text,
       },
     });
 
-    return NextResponse.json({ ok: true, entry });
-  } catch (err) {
+    return NextResponse.json(
+      {
+        success: true,
+        entry,
+      },
+      { status: 200 }
+    );
+  } catch (err: any) {
     console.error("INGEST FATAL ERROR:", err);
     return NextResponse.json(
-      { error: "Internal server error while ingesting. See server logs." },
-      { status: 500 },
+      {
+        success: false,
+        error:
+          "Internal server error while ingesting. Подробности смотри в логах сервера.",
+      },
+      { status: 500 }
+    );
+  }
+}
+
+// GET для загрузки последних записей
+export async function GET() {
+  try {
+    const entries = await prisma.portEntry.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+
+    const withCreatedAtString = entries.map((e) => ({
+      ...e,
+      createdAtString: e.createdAt.toISOString(),
+    }));
+
+    return NextResponse.json(
+      {
+        success: true,
+        entries: withCreatedAtString,
+      },
+      { status: 200 }
+    );
+  } catch (err) {
+    console.error("GET /api/ingest error:", err);
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Failed to load entries",
+      },
+      { status: 500 }
     );
   }
 }
