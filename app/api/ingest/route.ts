@@ -8,292 +8,241 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Тип данных, которые мы ожидаем от ИИ / fallback-парсера
-type ParsedPortPayload = {
-  port?: string | null;
-  country?: string | null;
-  terminal?: string | null;
-  operation?: string | null; // "Load" | "Discharge" | "Bunker" | ...
-  cargo?: string | null;
-  stowFactor?: string | null;
-  quantityInfo?: string | null;
+type ParsedPortInfo = {
+  port?: string;
+  country?: string;
+  terminal?: string;
+  operation?: string; // Load / Discharge / Bunker
 
-  waterDensity?: string | null;
+  cargo?: string;
+  stowFactor?: string;
+  quantityInfo?: string;
 
-  maxDraftMeters?: string | number | null;
-  maxDraftNotes?: string | null;
+  waterDensity?: string;
+  maxDraftMeters?: string;
+  maxDraftNotes?: string;
+  loaMeters?: string;
+  beamMeters?: string;
+  maxDwtMt?: string;
+  airDraftMeters?: string;
+  minFreeboardMeters?: string;
 
-  loaMeters?: string | number | null;
-  beamMeters?: string | number | null;
-  maxDwtMt?: string | number | null;
-  airDraftMeters?: string | number | null;
-  minFreeboardMeters?: string | number | null;
+  loadRatePerDayMt?: string;
+  dischargeRatePerDayMt?: string;
 
-  loadRatePerDayMt?: string | number | null;
-  dischargeRatePerDayMt?: string | number | null;
+  agents?: string;
+  costDockage?: string;
+  costPilotage?: string;
+  costTowage?: string;
+  costTotalEstimate?: string;
 
-  agents?: string | null;
+  bunkeringNotes?: string;
+  cleaningNotes?: string;
+  transitPsNotes?: string;
+  sulphurLimit?: string;
 
-  costDockage?: string | null;
-  costPilotage?: string | null;
-  costTowage?: string | null;
-  costTotalEstimate?: string | null;
-
-  bunkeringNotes?: string | null;
-  cleaningNotes?: string | null;
-  transitPsNotes?: string | null;
-  sulphurLimit?: string | null;
-
-  specialRestrictions?: string | null;
+  specialRestrictions?: string;
 };
 
-// Хелпер: любое значение → строка или null (под Prisma-схему)
-function toStr(value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value === "string") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) return null;
-    return value.toString();
-  }
-  // на всякий случай — превратим в строку всё остальное
-  return String(value);
-}
+async function extractTextFromRequest(req: NextRequest): Promise<string> {
+  const contentType = req.headers.get("content-type") || "";
 
-// Очень простой fallback-парсер, если OpenAI не сработал (или квота, или ошибка)
-function fallbackParse(text: string): ParsedPortPayload {
-  const lower = text.toLowerCase();
+  // 1) Если пришёл JSON
+  if (contentType.includes("application/json")) {
+    try {
+      const body = await req.json();
 
-  let terminal: string | null = null;
-  const termMatch = text.match(/\*\*Terminal:\*\*\s*([A-Za-z0-9\- ]+)/);
-  if (termMatch) terminal = termMatch[1].trim();
+      // Вдруг кто-то шлёт просто строку в JSON
+      if (typeof body === "string") {
+        return body;
+      }
 
-  let cargo: string | null = null;
-  let stowFactor: string | null = null;
-  const cargoMatch = text.match(/\*\*Cargo\s*&\s*SF:\*\*\s*([^;]+);?\s*\*{0,2}\s*Quantity/i);
-  if (cargoMatch) {
-    const raw = cargoMatch[1].trim(); // напр. "Soda Ash - 1 CBM/MT"
-    const parts = raw.split("-");
-    cargo = parts[0].trim();
-    if (parts[1]) stowFactor = parts[1].trim();
-  }
+      if (body && typeof body.text === "string") {
+        return body.text;
+      }
 
-  let maxDraftMeters: string | null = null;
-  const draftMatch = text.match(/Max Draft:\s*Draft:\s*[^0-9]*(\d+[.,]?\d*)\s*m/i);
-  if (draftMatch) {
-    maxDraftMeters = draftMatch[1].replace(",", ".");
+      // На всякий случай пробуем другие популярные ключи
+      if (body && typeof body.content === "string") {
+        return body.content;
+      }
+
+      console.error("INGEST: JSON без text/content поля:", body);
+      return "";
+    } catch (e) {
+      console.error("INGEST: ошибка парсинга JSON тела:", e);
+      return "";
+    }
   }
 
-  let loadRatePerDayMt: string | null = null;
-  const rateMatch = text.match(/Per day:\s*abt\s*([\d,]+)\s*MT\/shift/i);
-  if (rateMatch) {
-    loadRatePerDayMt = rateMatch[1].replace(/,/g, "");
+  // 2) Всё остальное — читаем как сырой текст
+  try {
+    const text = await req.text();
+    return text;
+  } catch (e) {
+    console.error("INGEST: ошибка чтения сырое тело:", e);
+    return "";
   }
-
-  const waterDensityMatch = text.match(/Water Density:\s*([0-9.]+)/i);
-  const waterDensity = waterDensityMatch ? waterDensityMatch[1] : null;
-
-  const pilotageMatch = text.match(/\*\*Pilotage:\*\*\s*([^\n]+)/i);
-  const costPilotage = pilotageMatch ? pilotageMatch[1].trim() : null;
-
-  const dockageMatch = text.match(/\*\*Dockage:\*\*\s*([^\n]+)/i);
-  const costDockage = dockageMatch ? dockageMatch[1].trim() : null;
-
-  const totalMatch = text.match(/\*\*Total:\*\*\s*([^\n]+)/i);
-  const costTotalEstimate = totalMatch ? totalMatch[1].trim() : null;
-
-  let operation: string | null = null;
-  if (lower.includes("***loading***") || lower.includes("loading")) {
-    operation = "Load";
-  } else if (lower.includes("***discharging***") || lower.includes("discharg")) {
-    operation = "Discharge";
-  } else if (lower.includes("bunkering") || lower.includes("bunker")) {
-    operation = "Bunker";
-  }
-
-  return {
-    port: null, // ИИ обычно определяет лучше — здесь оставим null
-    country: null,
-    terminal,
-    operation,
-    cargo,
-    stowFactor,
-    quantityInfo: null,
-    waterDensity,
-    maxDraftMeters,
-    maxDraftNotes: null,
-    loaMeters: null,
-    beamMeters: null,
-    maxDwtMt: null,
-    airDraftMeters: null,
-    minFreeboardMeters: null,
-    loadRatePerDayMt,
-    dischargeRatePerDayMt: null,
-    agents: null,
-    costDockage,
-    costPilotage,
-    costTowage: null,
-    costTotalEstimate,
-    bunkeringNotes: null,
-    cleaningNotes: null,
-    transitPsNotes: null,
-    sulphurLimit: null,
-    specialRestrictions: null,
-  };
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const { text } = body ?? {};
+    const text = (await extractTextFromRequest(req)).trim();
 
-    if (!text || typeof text !== "string" || !text.trim()) {
+    if (!text) {
+      console.error("INGEST: пустой или некорректный text в запросе");
       return NextResponse.json(
-        { error: "Missing required field: text" },
+        {
+          error:
+            "Missing required fields: text is mandatory and must be non-empty.",
+        },
         { status: 400 }
       );
     }
 
-    let parsed: ParsedPortPayload | null = null;
-
-    // Пытаемся сначала через OpenAI (красивый JSON)
-    try {
-      if (!process.env.OPENAI_API_KEY) {
-        throw new Error("No OPENAI_API_KEY provided");
-      }
-
-      const prompt = `
-You are a strict JSON parser for port operational notes.
-
-User will give you raw text like:
-
-- LB 212 - Soda Ash
-    - **Terminal:** LB212
-    - **Agents:**
-    - **Cost:**
-        - **Dockage:** Dockage Charges based on the LOA | LOA Slab Considered: From 165-180 mt | Basis: Fixed Cost USD 1512 per day x 3.25 Days = USD 4914.00
-        - **Pilotage:** abt $4k - 6$k
-        - **Total:** abt $25k - $40k
-
-and so on.
-
-You MUST respond with ONLY one JSON object with the following fields:
+    const systemPrompt = `
+Ты помощник по морским портам. Получаешь большой текст (инфа от агентов по порту/терминалу).
+Твоя задача — вернуть ОДИН JSON-объект строго такого вида:
 
 {
-  "port": "string or null",
-  "country": "string or null",
-  "terminal": "string or null",
-  "operation": "Load | Discharge | Bunker | null",
-  "cargo": "string or null",
-  "stowFactor": "string or null",
-  "quantityInfo": "string or null",
+  "port": "string (порт, город/порт, если есть)",
+  "country": "string или null",
+  "terminal": "string или null",
+  "operation": "Load | Discharge | Bunker",
 
-  "waterDensity": "string or null",
+  "cargo": "string или null",
+  "stowFactor": "string или null",
+  "quantityInfo": "string или null",
 
-  "maxDraftMeters": "string or number or null",
-  "maxDraftNotes": "string or null",
+  "waterDensity": "string или null",
+  "maxDraftMeters": "string или null",
+  "maxDraftNotes": "string или null",
+  "loaMeters": "string или null",
+  "beamMeters": "string или null",
+  "maxDwtMt": "string или null",
+  "airDraftMeters": "string или null",
+  "minFreeboardMeters": "string или null",
 
-  "loaMeters": "string or number or null",
-  "beamMeters": "string or number or null",
-  "maxDwtMt": "string or number or null",
-  "airDraftMeters": "string or number or null",
-  "minFreeboardMeters": "string or number or null",
+  "loadRatePerDayMt": "string или null",
+  "dischargeRatePerDayMt": "string или null",
 
-  "loadRatePerDayMt": "string or number or null",
-  "dischargeRatePerDayMt": "string or number or null",
+  "agents": "string или null",
+  "costDockage": "string или null",
+  "costPilotage": "string или null",
+  "costTowage": "string или null",
+  "costTotalEstimate": "string или null",
 
-  "agents": "string or null",
+  "bunkeringNotes": "string или null",
+  "cleaningNotes": "string или null",
+  "transitPsNotes": "string или null",
+  "sulphurLimit": "string или null",
 
-  "costDockage": "string or null",
-  "costPilotage": "string or null",
-  "costTowage": "string or null",
-  "costTotalEstimate": "string or null",
-
-  "bunkeringNotes": "string or null",
-  "cleaningNotes": "string or null",
-  "transitPsNotes": "string or null",
-  "sulphurLimit": "string or null",
-
-  "specialRestrictions": "string or null"
+  "specialRestrictions": "string или null"
 }
 
-Return ONLY valid JSON. No markdown, no comments, no explanation.
+Только JSON, без комментариев, без пояснений, без markdown.
+Если каких-то данных нет — ставь null.
 `;
 
-      const completion = await client.chat.completions.create({
-        model: "gpt-4.1-mini",
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content: prompt,
-          },
-          {
-            role: "user",
-            content: text,
-          },
-        ],
-      });
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: text,
+      instructions: systemPrompt,
+      response_format: {
+        type: "json_object",
+      },
+    });
 
-      const content = completion.choices[0]?.message?.content;
-      if (!content) {
-        throw new Error("Empty response from OpenAI");
-      }
-
-      parsed = JSON.parse(content) as ParsedPortPayload;
-    } catch (err) {
-      console.error("OpenAI parse failed, using fallback. Error:", err);
-      parsed = fallbackParse(text);
+    const outputPart = response.output[0];
+    if (outputPart.type !== "message") {
+      console.error("INGEST: неожиданный формат ответа OpenAI:", response);
+      return NextResponse.json(
+        { error: "Unexpected model response format" },
+        { status: 500 }
+      );
     }
 
-    // Нормализуем все поля под Prisma-схему (строки/nullable)
+    const rawJson =
+      outputPart.message.content[0]?.type === "output_text"
+        ? outputPart.message.content[0].text
+        : "";
+
+    if (!rawJson) {
+      console.error("INGEST: пустой текст в ответе модели:", response);
+      return NextResponse.json(
+        { error: "Empty model response" },
+        { status: 500 }
+      );
+    }
+
+    let parsed: ParsedPortInfo;
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch (e) {
+      console.error("INGEST: ошибка JSON.parse ответа модели:", rawJson, e);
+      return NextResponse.json(
+        { error: "Failed to parse model JSON" },
+        { status: 500 }
+      );
+    }
+
+    if (!parsed.operation || !parsed.terminal) {
+      console.error("INGEST: model did not return required fields:", parsed);
+      return NextResponse.json(
+        {
+          error:
+            "Model did not return mandatory fields (operation, terminal).",
+        },
+        { status: 400 }
+      );
+    }
+
     const entry = await prisma.portEntry.create({
       data: {
         port: parsed.port ?? "UNKNOWN_PORT",
         country: parsed.country ?? null,
         terminal: parsed.terminal ?? "UNKNOWN_TERMINAL",
-        operation: parsed.operation ?? "UNKNOWN_OPERATION",
+        operation: parsed.operation ?? "UNKNOWN",
 
-        cargo: toStr(parsed.cargo),
-        stowFactor: toStr(parsed.stowFactor),
-        quantityInfo: toStr(parsed.quantityInfo),
+        cargo: parsed.cargo ?? null,
+        stowFactor: parsed.stowFactor ?? null,
+        quantityInfo: parsed.quantityInfo ?? null,
 
-        waterDensity: toStr(parsed.waterDensity),
+        waterDensity: parsed.waterDensity ?? null,
+        maxDraftMeters: parsed.maxDraftMeters ?? null,
+        maxDraftNotes: parsed.maxDraftNotes ?? null,
+        loaMeters: parsed.loaMeters ?? null,
+        beamMeters: parsed.beamMeters ?? null,
+        maxDwtMt: parsed.maxDwtMt ?? null,
+        airDraftMeters: parsed.airDraftMeters ?? null,
+        minFreeboardMeters: parsed.minFreeboardMeters ?? null,
 
-        maxDraftMeters: toStr(parsed.maxDraftMeters),
-        maxDraftNotes: toStr(parsed.maxDraftNotes),
+        loadRatePerDayMt: parsed.loadRatePerDayMt ?? null,
+        dischargeRatePerDayMt: parsed.dischargeRatePerDayMt ?? null,
 
-        loaMeters: toStr(parsed.loaMeters),
-        beamMeters: toStr(parsed.beamMeters),
-        maxDwtMt: toStr(parsed.maxDwtMt),
-        airDraftMeters: toStr(parsed.airDraftMeters),
-        minFreeboardMeters: toStr(parsed.minFreeboardMeters),
+        agents: parsed.agents ?? null,
+        costDockage: parsed.costDockage ?? null,
+        costPilotage: parsed.costPilotage ?? null,
+        costTowage: parsed.costTowage ?? null,
+        costTotalEstimate: parsed.costTotalEstimate ?? null,
 
-        loadRatePerDayMt: toStr(parsed.loadRatePerDayMt),
-        dischargeRatePerDayMt: toStr(parsed.dischargeRatePerDayMt),
+        bunkeringNotes: parsed.bunkeringNotes ?? null,
+        cleaningNotes: parsed.cleaningNotes ?? null,
+        transitPsNotes: parsed.transitPsNotes ?? null,
+        sulphurLimit: parsed.sulphurLimit ?? null,
 
-        agents: toStr(parsed.agents),
-
-        costDockage: toStr(parsed.costDockage),
-        costPilotage: toStr(parsed.costPilotage),
-        costTowage: toStr(parsed.costTowage),
-        costTotalEstimate: toStr(parsed.costTotalEstimate),
-
-        bunkeringNotes: toStr(parsed.bunkeringNotes),
-        cleaningNotes: toStr(parsed.cleaningNotes),
-        transitPsNotes: toStr(parsed.transitPsNotes),
-        sulphurLimit: toStr(parsed.sulphurLimit),
-
-        specialRestrictions: toStr(parsed.specialRestrictions),
+        specialRestrictions: parsed.specialRestrictions ?? null,
 
         rawText: text,
       },
     });
 
-    return NextResponse.json({ success: true, entry }, { status: 200 });
-  } catch (err) {
+    return NextResponse.json({ ok: true, entry }, { status: 200 });
+  } catch (err: any) {
     console.error("INGEST FATAL ERROR:", err);
     return NextResponse.json(
-      { error: "Internal server error while ingesting" },
+      {
+        error: "Internal server error while ingesting. See server logs.",
+      },
       { status: 500 }
     );
   }
