@@ -13,26 +13,39 @@ model PortEntry {
 
   // Core identification
   port      String
-  country   String?   // optional
+  country   String?
   terminal  String
-  operation String    // "Load" | "Discharge" | "Bunker"
+  operation String   // "Load" | "Discharge" | "Bunker" etc.
 
-  // Cargo info
-  cargo        String?
-  stowFactor   String?  // raw text "45–47 CFT/MT" etc
-  quantityInfo String?  // e.g. "typical 30,800 MT"
+  // 🔹 Coordinates for Map
+  lat Float?
+  lon Float?
 
-  // Dimensions / draught (store as raw strings for now – real-world data is messy)
-  waterDensity       String?  // e.g. "1.025", "1.015–1.021"
-  maxDraftMeters     String?  // e.g. "11.88 m", "39 ft MLLW"
-  maxDraftNotes      String?  // any extra comments
-  loaMeters          String?  // e.g. "225 m"
-  beamMeters         String?  // e.g. "32.3 m"
-  maxDwtMt           String?  // e.g. "72,000 MT"
-  airDraftMeters     String?  // e.g. "20.4 m"
-  minFreeboardMeters String?  // e.g. "4.88 m"
+  // Cargo / productivity
+  cargo                String?
+  stowFactor           String?
+  quantityInfo         String?
+  typeOfCargoesHandled String?
+  productionPerDay     String?
+  numberOfGangs        String?
+  shiftsInfo           String?
+  equipmentUsed        String?
+  shiftsPerDay         String?
 
-  // Rates (also as strings – “12,000 MT/day”, ranges, etc.)
+  // Dimensions / hydro
+  waterDensity            String?
+  maxDraftMeters          String?
+  maxDraftNotes           String?
+  loaMeters               String?
+  beamMeters              String?
+  maxDwtMt                String?
+  airDraftMeters          String?
+  spoutAirDraft           String?
+  waterlineToHatchCoaming String?
+  minFreeboardMeters      String?
+  requiredTrim            String?
+
+  // Rates
   loadRatePerDayMt      String?
   dischargeRatePerDayMt String?
 
@@ -43,12 +56,24 @@ model PortEntry {
   costTowage        String?
   costTotalEstimate String?
 
-  bunkeringNotes      String?
-  cleaningNotes       String?
-  transitPsNotes      String?
-  sulphurLimit        String?
-  specialRestrictions String? // "min 2000 MT per hold", etc
+  // Ops details
+  transitPsNotes    String?
+  bunkeringPlace    String?
+  cleaningPermitted String?
+  sulphurLimit      String?
 
-  // Full raw text for reference & future re-parsing
+  bunkeringNotes String?
+  cleaningNotes  String?
+
+  // Restrictions / misc
+  specialRestrictions String?
+  otherInfo           String?
+  restrictionsJson    String?
+
+  // Source tracking
+  dataSource String?   // e.g. "GAC", "Sinoagent", "COSCO Shipping"
+  sourceDate DateTime? // date agent provided this info (≠ createdAt)
+
+  // raw text for re-parsing
   rawText String
 }

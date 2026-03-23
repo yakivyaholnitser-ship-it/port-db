@@ -2,23 +2,15 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
 export async function GET() {
-  const entries = await prisma.portEntry.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 50,
-    select: {
-      id: true,
-      port: true,
-      terminal: true,
-      operation: true,
-      cargo: true,
-      waterDensity: true,
-      maxDraftMeters: true,
-      maxDraftNotes: true,
-      loadRatePerDayMt: true,
-      dischargeRatePerDayMt: true,
-      specialRestrictions: true,
-    },
-  });
+  try {
+    const entries = await prisma.portEntry.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 500,
+    });
 
-  return NextResponse.json({ entries });
+    return NextResponse.json({ entries }, { status: 200 });
+  } catch (e) {
+    console.error("PORTS API ERROR:", e);
+    return NextResponse.json({ error: "Failed to load ports." }, { status: 500 });
+  }
 }
