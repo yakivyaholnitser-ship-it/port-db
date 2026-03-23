@@ -11,7 +11,7 @@
   "dependencies": {
     "@prisma/client": "^6.19.0",
     "leaflet": "^1.9.4",
-    "next": "16.0.3",
+    "next": "16.0.10",
     "openai": "^6.9.0",
     "pdf-parse": "^1.1.1",
     "prisma": "^6.19.0",
