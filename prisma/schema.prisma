@@ -74,6 +74,8 @@ model PortEntry {
   dataSource String?   // e.g. "GAC", "Sinoagent", "COSCO Shipping"
   sourceDate DateTime? // date agent provided this info (≠ createdAt)
 
+  factsJson String? // AI-extracted free-form facts as JSON array
+
   // raw text for re-parsing
   rawText String
 }

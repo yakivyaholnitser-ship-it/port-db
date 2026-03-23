@@ -15,6 +15,10 @@ If you cannot confidently map something to a fixed field, you MUST put it into
 the "restrictions" array or into "otherInfo". Every important bullet / line
 with concrete meaning must appear somewhere in the JSON.
 
+NORMALIZATION RULES (follow strictly):
+- "port": city name only, no province, no country, no suffix like "Port". Use shortest standard name. "Vancouver" not "Vancouver, BC". "Nansha" not "Nansha Port". "Rotterdam" not "Port of Rotterdam".
+- "country": full country name only. "Canada" not "CA". "China" not "CN".
+
 Return ONLY a SINGLE VALID JSON OBJECT (no markdown, no \`\`\`).
 
 {
@@ -69,7 +73,9 @@ Return ONLY a SINGLE VALID JSON OBJECT (no markdown, no \`\`\`).
   "specialRestrictions": string | null,
   "otherInfo": string | null,
 
-  "restrictions": [{ "name": string, "value": string }] | null
+  "restrictions": [{ "name": string, "value": string }] | null,
+
+  "factsJson": JSON string of array of facts that don't fit other fields. Each fact: {"category": string, "value": string, "note": string | null}. Extract ANY operationally relevant info not captured elsewhere: tides, surveys, customs, crew rules, documentation, port authority rules, environmental restrictions, special procedures, berthing notes, etc. If nothing extra, return "[]".
 }
 
 COORDINATES RULES:
@@ -85,6 +91,15 @@ IMPORTANT:
 - Do NOT drop useful info. If not mapped to fixed fields, put into restrictions[] or otherInfo.
 - Output MUST be valid JSON.
 `;
+
+function normalizePortName(port: string): string {
+  return port
+    .replace(/,\s*(BC|AB|ON|QC|NS|NB|MB|SK|PE|NL|NT|NU|YT)$/i, "")
+    .replace(/,\s*(CA|US|CN|AU|GB|DE|FR|ES|IT|NL|BE|PL|GR|TR|AE|SG|JP|KR|IN|BR|AR|ZA)$/i, "")
+    .replace(/\b(Port of|Port)\s+/i, "")
+    .replace(/\s+Port$/i, "")
+    .trim();
+}
 
 // string-or-null
 function s(value: unknown): string | null {
@@ -178,6 +193,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (typeof parsed.port === "string") {
+      parsed.port = normalizePortName(parsed.port);
+    }
+
     const entry = await prisma.portEntry.create({
       data: {
         port: s(parsed.port) ?? "UNKNOWN_PORT",
@@ -232,6 +251,7 @@ export async function POST(req: NextRequest) {
         restrictionsJson: parsed.restrictions
           ? JSON.stringify(parsed.restrictions)
           : null,
+        factsJson: parsed.factsJson ?? null,
 
         dataSource,
         sourceDate,

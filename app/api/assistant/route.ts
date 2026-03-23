@@ -134,6 +134,16 @@ export async function POST(req: NextRequest) {
         if (e.specialRestrictions) lines.push(`    Restrictions: ${e.specialRestrictions}`);
         if (e.otherInfo) lines.push(`    Other: ${e.otherInfo}`);
 
+        if (e.factsJson) {
+          try {
+            const facts = JSON.parse(e.factsJson);
+            if (Array.isArray(facts) && facts.length) {
+              const factLines = facts.map((f: any) => `${f.category}: ${f.value}${f.note ? " (" + f.note + ")" : ""}`).join("; ");
+              lines.push(`    Additional facts: ${factLines}`);
+            }
+          } catch {}
+        }
+
         entryLines.push(lines.join("\n"));
       }
 
