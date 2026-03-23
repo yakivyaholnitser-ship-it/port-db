@@ -94,10 +94,13 @@ IMPORTANT:
 
 function normalizePortName(port: string): string {
   return port
+    .replace(/\s*\([^)]*\)\s*$/i, "")
     .replace(/,\s*(BC|AB|ON|QC|NS|NB|MB|SK|PE|NL|NT|NU|YT)$/i, "")
+    .replace(/\s+(BC|AB|ON|QC|NS|NB|MB|SK|PE|NL|NT|NU|YT)$/i, "")
     .replace(/,\s*(CA|US|CN|AU|GB|DE|FR|ES|IT|NL|BE|PL|GR|TR|AE|SG|JP|KR|IN|BR|AR|ZA)$/i, "")
     .replace(/\b(Port of|Port)\s+/i, "")
     .replace(/\s+Port$/i, "")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
