@@ -2,6 +2,8 @@ import Link from "next/link";
 import ReviewQueue from "./ReviewQueue";
 import { prisma } from "@/lib/prisma";
 
+export const dynamic = "force-dynamic";
+
 export default async function ReviewPage() {
   const logs = await prisma.locationMatchLog.findMany({
     orderBy: { createdAt: "desc" },

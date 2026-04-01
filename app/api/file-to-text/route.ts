@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
-import pdfParse from "pdf-parse";
+import pdfParse from "pdf-parse/lib/pdf-parse";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
