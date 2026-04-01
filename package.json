@@ -3,10 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:location-regression": "node scripts/location_resolution_regression.js",
+    "seed:global-location-fixtures": "node scripts/seed_global_location_fixtures.js",
+    "seed:global-condition-fixtures": "node scripts/seed_global_condition_fixtures.js",
+    "test:condition-regression": "node scripts/condition_regression.js",
+    "backfill:port-coordinates": "node scripts/backfill_port_coordinates.js",
+    "refresh:port-coordinates": "node scripts/backfill_port_coordinates.js --refresh-all"
   },
   "dependencies": {
     "@prisma/client": "^6.19.0",

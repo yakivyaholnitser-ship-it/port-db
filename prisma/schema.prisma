@@ -7,6 +7,38 @@ generator client {
   provider = "prisma-client-js"
 }
 
+enum PortFactScope {
+  PORT
+  TERMINAL
+  BERTH
+}
+
+enum LocationEntityType {
+  TERMINAL
+  BERTH
+}
+
+enum LocationMatchMethod {
+  EXACT
+  ALIAS
+  FUZZY
+  AI
+  CREATED_NEW
+  BACKFILL
+}
+
+enum MatchConfidence {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum LocationMatchStatus {
+  MATCHED
+  CREATED_NEW
+  NEEDS_REVIEW
+}
+
 model PortEntry {
   id        Int      @id @default(autoincrement())
   createdAt DateTime @default(now())
@@ -78,4 +110,155 @@ model PortEntry {
 
   // raw text for re-parsing
   rawText String
+}
+
+model Port {
+  id            Int            @id @default(autoincrement())
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  name          String
+  normalizedName String
+  country       String?
+  lat           Float?
+  lon           Float?
+  terminals     Terminal[]
+  berths        Berth[]
+  sourceRecords SourceRecord[]
+  facts         PortFact[]
+  locationMatchLogs LocationMatchLog[]
+
+  @@unique([normalizedName, country])
+}
+
+model Terminal {
+  id             Int            @id @default(autoincrement())
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  name           String
+  normalizedName String
+  lat            Float?
+  lon            Float?
+  portId         Int
+  port           Port           @relation(fields: [portId], references: [id], onDelete: Cascade)
+  berths         Berth[]
+  sourceRecords  SourceRecord[]
+  facts          PortFact[]
+  aliases        TerminalAlias[]
+  locationMatchLogs LocationMatchLog[]
+
+  @@unique([portId, normalizedName])
+}
+
+model Berth {
+  id             Int            @id @default(autoincrement())
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  name           String
+  normalizedName String
+  lat            Float?
+  lon            Float?
+  portId         Int
+  port           Port           @relation(fields: [portId], references: [id], onDelete: Cascade)
+  terminalId     Int?
+  terminal       Terminal?      @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  sourceRecords  SourceRecord[]
+  facts          PortFact[]
+  aliases        BerthAlias[]
+  locationMatchLogs LocationMatchLog[]
+
+  @@index([portId])
+  @@unique([terminalId, normalizedName])
+}
+
+model TerminalAlias {
+  id             Int       @id @default(autoincrement())
+  createdAt      DateTime  @default(now())
+  name           String
+  normalizedName String
+  terminalId     Int
+  terminal       Terminal  @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+
+  @@index([normalizedName])
+  @@unique([terminalId, normalizedName])
+}
+
+model BerthAlias {
+  id             Int      @id @default(autoincrement())
+  createdAt      DateTime @default(now())
+  name           String
+  normalizedName String
+  berthId        Int
+  berth          Berth    @relation(fields: [berthId], references: [id], onDelete: Cascade)
+
+  @@index([normalizedName])
+  @@unique([berthId, normalizedName])
+}
+
+model SourceRecord {
+  id         Int        @id @default(autoincrement())
+  createdAt  DateTime   @default(now())
+  sourceName String?
+  sourceDate DateTime?
+  rawText    String
+  portId     Int
+  port       Port       @relation(fields: [portId], references: [id], onDelete: Cascade)
+  terminalId Int?
+  terminal   Terminal?  @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  berthId    Int?
+  berth      Berth?     @relation(fields: [berthId], references: [id], onDelete: Cascade)
+  facts      PortFact[]
+  locationMatchLogs LocationMatchLog[]
+
+  @@index([portId, sourceDate])
+  @@index([terminalId, sourceDate])
+  @@index([berthId, sourceDate])
+}
+
+model PortFact {
+  id             Int           @id @default(autoincrement())
+  createdAt      DateTime      @default(now())
+  scope          PortFactScope
+  category       String
+  value          String
+  unit           String?
+  notes          String?
+  rawSnippet     String?
+  portId         Int
+  port           Port          @relation(fields: [portId], references: [id], onDelete: Cascade)
+  terminalId     Int?
+  terminal       Terminal?     @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  berthId        Int?
+  berth          Berth?        @relation(fields: [berthId], references: [id], onDelete: Cascade)
+  sourceRecordId Int
+  sourceRecord   SourceRecord  @relation(fields: [sourceRecordId], references: [id], onDelete: Cascade)
+
+  @@index([portId, category])
+  @@index([terminalId, category])
+  @@index([berthId, category])
+  @@index([sourceRecordId])
+}
+
+model LocationMatchLog {
+  id             Int                 @id @default(autoincrement())
+  createdAt      DateTime            @default(now())
+  entityType     LocationEntityType
+  rawName        String
+  normalizedName String
+  matchedName    String?
+  method         LocationMatchMethod
+  confidence     MatchConfidence
+  status         LocationMatchStatus
+  reason         String?
+  portId         Int
+  port           Port                @relation(fields: [portId], references: [id], onDelete: Cascade)
+  terminalId     Int?
+  terminal       Terminal?           @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  berthId        Int?
+  berth          Berth?              @relation(fields: [berthId], references: [id], onDelete: Cascade)
+  sourceRecordId Int?
+  sourceRecord   SourceRecord?       @relation(fields: [sourceRecordId], references: [id], onDelete: Cascade)
+
+  @@index([portId, createdAt])
+  @@index([status, confidence])
+  @@index([sourceRecordId])
 }

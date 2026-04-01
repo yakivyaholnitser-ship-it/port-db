@@ -39,35 +39,6 @@ type Message = {
   content: string;
 };
 
-function safeJsonPreview(entry: PortEntryForAssistant) {
-  // короткий “контекст” — чтобы не отправлять мегабайты rawText
-  return {
-    id: entry.id,
-    createdAt: entry.createdAt,
-    port: entry.port,
-    country: entry.country ?? null,
-    terminal: entry.terminal,
-    operation: entry.operation,
-    dataSource: entry.dataSource ?? null,
-    sourceDate: entry.sourceDate ?? null,
-    lat: entry.lat ?? null,
-    lon: entry.lon ?? null,
-    cargo: entry.cargo ?? null,
-    maxDraftMeters: entry.maxDraftMeters ?? null,
-    loaMeters: entry.loaMeters ?? null,
-    beamMeters: entry.beamMeters ?? null,
-    maxDwtMt: entry.maxDwtMt ?? null,
-    waterDensity: entry.waterDensity ?? null,
-    transitPsNotes: entry.transitPsNotes ?? null,
-    bunkeringPlace: entry.bunkeringPlace ?? null,
-    cleaningPermitted: entry.cleaningPermitted ?? null,
-    sulphurLimit: entry.sulphurLimit ?? null,
-    specialRestrictions: entry.specialRestrictions ?? null,
-    otherInfo: entry.otherInfo ?? null,
-    restrictionsJson: entry.restrictionsJson ?? null,
-  };
-}
-
 export default function AIAssistant({
   entries,
   onHighlightPorts,
@@ -126,8 +97,6 @@ export default function AIAssistant({
     try {
       // Ограничим контекст, чтобы не упираться в лимиты.
       // Берём до 80 записей, но “сжатых” (без rawText).
-      const context = entries.slice(0, 80).map(safeJsonPreview);
-
       // Send full conversation history (skip the initial welcome message at index 0)
       const history = nextMessages.slice(1).map((m) => ({
         role: m.role,

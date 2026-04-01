@@ -185,7 +185,7 @@ export async function POST(req: NextRequest) {
     }
 
     const rawJson = firstContent.text;
-    let parsed: any;
+    let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(rawJson);
     } catch (e) {
@@ -254,7 +254,12 @@ export async function POST(req: NextRequest) {
         restrictionsJson: parsed.restrictions
           ? JSON.stringify(parsed.restrictions)
           : null,
-        factsJson: parsed.factsJson ?? null,
+        factsJson:
+          typeof parsed.factsJson === "string"
+            ? parsed.factsJson
+            : parsed.factsJson != null
+              ? JSON.stringify(parsed.factsJson)
+              : null,
 
         dataSource,
         sourceDate,
@@ -264,7 +269,7 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json({ entry }, { status: 200 });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("INGEST FATAL ERROR:", err);
     return NextResponse.json(
       { error: "Internal server error while ingesting. See server logs." },

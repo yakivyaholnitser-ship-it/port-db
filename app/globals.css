@@ -1,26 +1,88 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --base: #07131b;
+  --panel: #0d2330;
+  --panel-strong: #123241;
+  --line-soft: rgba(132, 167, 182, 0.16);
+  --line-strong: rgba(132, 167, 182, 0.24);
+  --ink-main: #ebf3f4;
+  --ink-soft: #9db2bb;
+  --ink-muted: #6f8893;
+  --accent: #71c2b7;
+  --accent-soft: #9ed8d0;
+  --harbor: #8fb6d8;
+  --alert: #d37a33;
+  --danger: #c54f3f;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-background: var(--base);
+  --color-foreground: var(--ink-main);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--base);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 15% 10%, rgba(113, 194, 183, 0.1), transparent 24%),
+    radial-gradient(circle at 85% 8%, rgba(211, 122, 51, 0.09), transparent 18%),
+    linear-gradient(180deg, #07131b 0%, #081822 38%, #06131c 100%);
+  color: var(--ink-main);
+  font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+}
+
+.font-serif {
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+}
+
+::selection {
+  background: rgba(113, 194, 183, 0.28);
+  color: var(--ink-main);
+}
+
+.leaflet-container {
+  position: relative;
+  z-index: 0;
+}
+
+.leaflet-pane {
+  z-index: 10 !important;
+}
+
+.leaflet-tile-pane {
+  z-index: 1 !important;
+}
+
+.leaflet-overlay-pane {
+  z-index: 2 !important;
+}
+
+.leaflet-shadow-pane {
+  z-index: 3 !important;
+}
+
+.leaflet-marker-pane {
+  z-index: 4 !important;
+}
+
+.leaflet-tooltip-pane {
+  z-index: 5 !important;
+}
+
+.leaflet-popup-pane {
+  z-index: 6 !important;
+}
+
+.leaflet-top,
+.leaflet-bottom,
+.leaflet-control {
+  z-index: 7 !important;
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import "leaflet/dist/leaflet.css";
+import { useMemo } from "react";
 import { MapContainer, TileLayer, CircleMarker, Popup } from "react-leaflet";
 
 type PortEntryForMap = {
@@ -16,6 +17,7 @@ type PortEntryForMap = {
 };
 
 type PortGroup = {
+  id: number;
   portKey: string;
   port: string;
   country?: string | null;
@@ -32,11 +34,24 @@ type PortGroup = {
 export default function PortsMap({
   entries,
   highlightedPorts,
+  selectedPortId,
+  selectedPortStructure,
+  onSelectPort,
+  onSelectTerminal,
+  onSelectBerth,
 }: {
   entries: PortEntryForMap[];
   highlightedPorts: string[];
+  selectedPortId: number | null;
+  selectedPortStructure: { name: string; berths: string[] }[];
+  onSelectPort: (portId: number) => void;
+  onSelectTerminal: (terminalName: string) => void;
+  onSelectBerth: (terminalName: string, berthName: string) => void;
 }) {
-  const highlighted = new Set((highlightedPorts || []).map((p) => p.toLowerCase()));
+  const highlighted = useMemo(
+    () => new Set((highlightedPorts || []).map((p) => p.toLowerCase())),
+    [highlightedPorts]
+  );
 
   const groupMap = new Map<string, PortGroup>();
 
@@ -45,6 +60,7 @@ export default function PortsMap({
     if (!groupMap.has(key)) {
       if (typeof e.lat === "number" && typeof e.lon === "number") {
         groupMap.set(key, {
+          id: e.id,
           portKey: key,
           port: e.port,
           country: e.country,
@@ -54,6 +70,7 @@ export default function PortsMap({
         });
       } else {
         groupMap.set(key, {
+          id: e.id,
           portKey: key,
           port: e.port,
           country: e.country,
@@ -72,18 +89,19 @@ export default function PortsMap({
       g.lon = e.lon;
     }
 
-    groupMap.get(key)!.terminals.push({
-      terminal: e.terminal,
-      operation: e.operation,
-      maxDraftMeters: e.maxDraftMeters,
-      specialRestrictions: e.specialRestrictions,
-    });
+    if (e.terminal || e.operation || e.maxDraftMeters || e.specialRestrictions) {
+      groupMap.get(key)!.terminals.push({
+        terminal: e.terminal,
+        operation: e.operation,
+        maxDraftMeters: e.maxDraftMeters,
+        specialRestrictions: e.specialRestrictions,
+      });
+    }
   }
 
   const groups = Array.from(groupMap.values()).filter(
     (g) => !isNaN(g.lat) && !isNaN(g.lon)
   );
-
   return (
     <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between">
@@ -99,6 +117,10 @@ export default function PortsMap({
           zoom={2}
           style={{ height: "520px", width: "100%" }}
           scrollWheelZoom
+          zoomAnimation={false}
+          fadeAnimation={false}
+          markerZoomAnimation={false}
+          preferCanvas
         >
           <TileLayer
             attribution='&copy; OpenStreetMap contributors'
@@ -107,11 +129,15 @@ export default function PortsMap({
 
           {groups.map((g) => {
             const isHighlighted = highlighted.has(g.portKey);
+            const isSelectedPort = selectedPortId === g.id;
 
             return (
               <CircleMarker
                 key={g.portKey}
                 center={[g.lat, g.lon]}
+                eventHandlers={{
+                  click: () => onSelectPort(g.id),
+                }}
                 radius={isHighlighted ? 9 : 6}
                 pathOptions={{
                   color: isHighlighted ? "#10b981" : "#94a3b8",
@@ -122,9 +148,111 @@ export default function PortsMap({
               >
                 <Popup>
                   <div style={{ fontSize: 12, maxWidth: 260 }}>
-                    <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                      {g.port} {g.country ? `(${g.country})` : ""}
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 8,
+                        marginBottom: 8,
+                      }}
+                    >
+                      <div style={{ fontWeight: 700 }}>
+                        {g.port} {g.country ? `(${g.country})` : ""}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onSelectPort(g.id)}
+                        style={{
+                          border: "1px solid rgba(16,185,129,0.28)",
+                          borderRadius: 999,
+                          padding: "4px 8px",
+                          fontSize: 10,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.12em",
+                          color: "#0f172a",
+                          background: "rgba(113,194,183,0.88)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        Open
+                      </button>
                     </div>
+                    {isSelectedPort && selectedPortStructure.length > 0 ? (
+                      <div style={{ marginBottom: 10 }}>
+                        <div
+                          style={{
+                            fontSize: 10,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.16em",
+                            color: "#64748b",
+                            marginBottom: 6,
+                          }}
+                        >
+                          Terminals
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: 6,
+                          }}
+                        >
+                          {selectedPortStructure.map((terminal) => (
+                            <div key={terminal.name} style={{ width: "100%" }}>
+                              <button
+                                type="button"
+                                onClick={() => onSelectTerminal(terminal.name)}
+                                style={{
+                                  border: "1px solid rgba(15,23,42,0.12)",
+                                  borderRadius: 999,
+                                  padding: "4px 8px",
+                                  fontSize: 10,
+                                  textTransform: "uppercase",
+                                  letterSpacing: "0.12em",
+                                  color: "#0f172a",
+                                  background: "rgba(226,232,240,0.92)",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                {terminal.name}
+                              </button>
+                              {terminal.berths.length > 0 ? (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: 6,
+                                    marginTop: 6,
+                                    marginLeft: 8,
+                                  }}
+                                >
+                                  {terminal.berths.map((berth) => (
+                                    <button
+                                      key={`${terminal.name}-${berth}`}
+                                      type="button"
+                                      onClick={() => onSelectBerth(terminal.name, berth)}
+                                      style={{
+                                        border: "1px solid rgba(148,163,184,0.28)",
+                                        borderRadius: 999,
+                                        padding: "3px 7px",
+                                        fontSize: 10,
+                                        letterSpacing: "0.08em",
+                                        color: "#0f172a",
+                                        background: "rgba(191,219,254,0.9)",
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      {berth}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                     {g.terminals.map((t, i) => (
                       <div
                         key={i}
@@ -137,10 +265,12 @@ export default function PortsMap({
                               : "none",
                         }}
                       >
-                        <div style={{ fontWeight: 700 }}>{t.terminal}</div>
-                        <div>
-                          <b>Operation:</b> {t.operation}
-                        </div>
+                        {t.terminal ? <div style={{ fontWeight: 700 }}>{t.terminal}</div> : null}
+                        {t.operation ? (
+                          <div>
+                            <b>Operation:</b> {t.operation}
+                          </div>
+                        ) : null}
                         {t.maxDraftMeters && (
                           <div>
                             <b>Max draft:</b> {t.maxDraftMeters}

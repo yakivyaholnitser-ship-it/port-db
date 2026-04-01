@@ -19,11 +19,16 @@ export async function DELETE(
     await prisma.portEntry.delete({ where: { id } });
 
     return NextResponse.json({ ok: true }, { status: 200 });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("DELETE PORT ENTRY ERROR:", err);
 
     // если запись уже удалена/не найдена
-    if (err?.code === "P2025") {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      err.code === "P2025"
+    ) {
       return NextResponse.json({ error: "Entry not found" }, { status: 404 });
     }
 
