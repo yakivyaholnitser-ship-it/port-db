@@ -55,7 +55,8 @@ Rules:
 - If a fact clearly applies to a terminal but not a berth, set scope to "terminal".
 - If a fact applies to the whole port, set scope to "port".
 - Do not confuse "draft survey" with draft restriction. "Draft survey", "shore scale", and cargo quantity determination belong to survey/other, not draft.
-- Valid categories include: draft, density, discharge_rate, load_rate, tide, equipment, gangs, shifts, cargo, restriction, customs, bunker, cleaning, survey, ukc, freeboard, trim, loa, beam, dwt, air_draft, production, sulphur, transit, distance_ps_to_anchorage, distance_ps_to_berth, other.
+- Do not confuse WLTHC, topping height, hatch topping measurements, or grain-capacity topping limits with UKC. Those belong to hatch_height / restriction, not under-keel clearance.
+- Valid categories include: draft, density, discharge_rate, load_rate, tide, equipment, gangs, shifts, cargo, restriction, customs, bunker, cleaning, survey, ukc, hatch_height, freeboard, trim, loa, beam, dwt, air_draft, production, sulphur, transit, distance_ps_to_anchorage, distance_ps_to_berth, cost, other.
 - Capture operationally important details even if they do not fit a standard bucket; use category "other" when needed.
 - Never drop a meaningful operational constraint or note.
 - If the message contains only coordinates/location identity and no operational facts, return an empty facts array.`;

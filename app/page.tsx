@@ -112,11 +112,13 @@ const CATEGORY_LABELS: Record<string, string> = {
   cleaning: "Cleaning",
   survey: "Survey",
   ukc: "UKC",
+  hatch_height: "Hatch / Topping Height",
   freeboard: "Freeboard",
   trim: "Trim",
   loa: "LOA",
   beam: "Beam",
   dwt: "DWT",
+  cost: "Costs",
   displacement: "Displacement",
   density: "Density",
   air_draft: "Air Draft",
@@ -136,6 +138,7 @@ const PRIORITY_CATEGORIES = [
   "density",
   "tide",
   "ukc",
+  "hatch_height",
   "freeboard",
   "trim",
   "outreach",
@@ -159,6 +162,10 @@ function displayCategoryForFact(fact: PortFact) {
 
   if (/\bdraft survey\b/.test(haystack) || /\bshore scale\b/.test(haystack)) return "survey";
   if (/\bfreeboard\b/.test(haystack)) return "freeboard";
+  if (/\bwlthc\b|\btopping\b|\bgrain capacity\b|\bhatch\b/.test(haystack)) return "hatch_height";
+  if (/\bdockage\b|\bpilotage\b|\bdues\b|\btariff\b|\bcosts?\b|\busd\b|\bagency fee\b|\bport charges?\b/.test(haystack)) {
+    return "cost";
+  }
   if (base !== "other") return base;
 
   if (/\boutreach\b/.test(haystack)) return "outreach";
@@ -997,7 +1004,7 @@ export default function PortsPage() {
                 Port Intelligence Console
               </p>
               <h1 className="mt-3 max-w-3xl font-serif text-4xl leading-tight text-[color:var(--ink-main)] lg:text-5xl">
-                Operational evidence, conflicts, and berth-level truth in one view.
+                Operational evidence, value variation, and berth-level truth in one view.
               </h1>
               <p className="mt-4 max-w-2xl text-sm leading-7 text-[color:var(--ink-soft)] lg:text-[15px]">
                 Structure free-form port messages into a live intelligence ledger, keep every source,
@@ -1017,7 +1024,7 @@ export default function PortsPage() {
                 <div className="mt-2 text-sm text-[color:var(--ink-soft)]">historical facts across all scopes</div>
               </div>
               <div className={`rounded-[24px] border p-4 ${badgeTone(stats.conflicts)}`}>
-                <div className="text-[11px] uppercase tracking-[0.24em]">Conflict Alerts</div>
+                <div className="text-[11px] uppercase tracking-[0.24em]">Value Variation</div>
                 <div className="mt-3 text-3xl font-semibold">{stats.conflicts}</div>
                 <div className="mt-2 text-sm">categories with competing values</div>
               </div>
@@ -1045,7 +1052,7 @@ export default function PortsPage() {
           </div>
         </header>
 
-        <div className="mt-4 grid gap-4 xl:grid-cols-[300px_minmax(0,1.45fr)_360px]">
+        <div className="mt-4 grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
           <aside className="overflow-hidden rounded-[28px] border border-[color:var(--line-strong)] bg-[color:rgba(8,24,33,0.82)]">
             <div className="border-b border-[color:var(--line-soft)] px-5 py-4">
               <div className="flex items-center justify-between gap-3">
@@ -1122,7 +1129,7 @@ export default function PortsPage() {
                         </div>
                         <div className="flex items-center gap-2">
                           <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] ${badgeTone(portConflicts)}`}>
-                            {portConflicts === 0 ? "clean" : `${portConflicts} conflicts`}
+                            {portConflicts === 0 ? "stable" : `${portConflicts} variations`}
                           </span>
                           <button
                             type="button"
@@ -1146,11 +1153,54 @@ export default function PortsPage() {
                 })
               )}
             </div>
+
+            <div className="border-t border-[color:var(--line-soft)] px-5 py-4">
+              <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">Recent evidence</div>
+              <div className="mt-4 space-y-3">
+                {!selectedPort && detailLoading ? (
+                  <p className="text-sm text-[color:var(--ink-soft)]">Loading recent evidence...</p>
+                ) : !selectedPort ? (
+                  <p className="text-sm text-[color:var(--ink-soft)]">Select a port to inspect recent evidence.</p>
+                ) : sourceMoments.length === 0 ? (
+                  <p className="text-sm text-[color:var(--ink-soft)]">No source records yet for this port.</p>
+                ) : (
+                  sourceMoments.slice(0, 8).map((item) => (
+                    <div
+                      key={item.sourceRecordId}
+                      className="rounded-[18px] border border-[color:var(--line-soft)] bg-[color:rgba(7,24,32,0.74)] p-3"
+                    >
+                      <div className="text-sm font-semibold text-[color:var(--ink-main)]">{item.source}</div>
+                      <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-[color:var(--ink-muted)]">
+                        {item.label} · {formatDate(item.sourceDate)}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </aside>
 
           <main className="space-y-4">
             <section className="overflow-hidden rounded-[30px] border border-[color:var(--line-strong)] bg-[color:rgba(8,28,39,0.84)]">
-              <div className="grid gap-4 border-b border-[color:var(--line-soft)] px-5 py-5 lg:grid-cols-[1.1fr_0.9fr] lg:px-6">
+              <div className="mt-5 rounded-[28px] bg-[color:rgba(8,24,33,0.82)] p-5">
+                <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">AI Analyst</div>
+                <div className="mt-2 max-w-2xl text-sm leading-7 text-[color:var(--ink-soft)]">
+                  Ask about draft margins, berth restrictions, density assumptions, or compare sources for the selected port and its terminals.
+                </div>
+                <div className="mt-5">
+                  <AIAssistant
+                    ports={ports.map((port) => ({
+                      id: port.id,
+                      name: port.name,
+                      country: port.country,
+                    }))}
+                    initialPortId={selectedPortId}
+                    onHighlightPorts={() => {}}
+                  />
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-4 border-b border-[color:var(--line-soft)] px-5 py-5 lg:grid-cols-[1.1fr_0.9fr] lg:px-6">
                 <div>
                   <div className="text-[11px] uppercase tracking-[0.34em] text-[color:var(--ink-muted)]">Selected dossier</div>
                   <div className="mt-3 flex flex-wrap items-end gap-3">
@@ -1164,7 +1214,7 @@ export default function PortsPage() {
                     ) : null}
                   </div>
                   <p className="mt-3 max-w-2xl text-sm leading-7 text-[color:var(--ink-soft)]">
-                    See terminal structure, evidence by category, and every conflicting operational datapoint with its source trail.
+                    See terminal structure, evidence by category, and every operational datapoint with its source trail.
                   </p>
                   {selectedTerminalName || selectedBerthName ? (
                     <div className="mt-4 flex items-center gap-3">
@@ -1202,7 +1252,7 @@ export default function PortsPage() {
                     <div className="mt-2 text-2xl font-semibold text-[color:var(--ink-main)]">{sourceMoments.length}</div>
                   </div>
                   <div className={`rounded-[22px] border p-4 ${badgeTone(conflictGroups.length)}`}>
-                    <div className="text-[11px] uppercase tracking-[0.2em]">Conflicts</div>
+                    <div className="text-[11px] uppercase tracking-[0.2em]">Variations</div>
                     <div className="mt-2 text-2xl font-semibold">{conflictGroups.length}</div>
                   </div>
                 </div>
@@ -1501,84 +1551,9 @@ export default function PortsPage() {
               )}
             </section>
 
-            <section className="rounded-[28px] border border-[color:var(--line-strong)] bg-[color:rgba(8,24,33,0.82)] p-5">
-              <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">AI Analyst</div>
-              <div className="mt-2 max-w-2xl text-sm leading-7 text-[color:var(--ink-soft)]">
-                Ask about draft margins, berth restrictions, density assumptions, or compare sources for the selected port and its terminals.
-              </div>
-              <div className="mt-5">
-                <AIAssistant entries={[]} onHighlightPorts={() => {}} />
-              </div>
-            </section>
             </section>
           </main>
 
-          <aside className="space-y-4">
-            <section className="rounded-[28px] border border-[color:var(--line-strong)] bg-[color:rgba(8,24,33,0.82)] p-5">
-              <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">Conflict watch</div>
-              <h3 className="mt-2 text-xl font-semibold text-[color:var(--ink-main)]">Evidence collisions</h3>
-
-              {!selectedPort && detailLoading ? (
-                <p className="mt-6 text-sm text-[color:var(--ink-soft)]">Loading conflicts...</p>
-              ) : !selectedPort ? (
-                <p className="mt-6 text-sm text-[color:var(--ink-soft)]">Select a port to inspect conflicts.</p>
-              ) : conflictGroups.length === 0 ? (
-                <div className="mt-5 rounded-[22px] border border-[color:rgba(113,194,183,0.22)] bg-[color:rgba(113,194,183,0.08)] p-4 text-sm text-[color:var(--accent-soft)]">
-                  No conflicting values detected yet for this port.
-                </div>
-              ) : (
-                <div className="mt-5 space-y-3">
-                  {conflictGroups.map((group, index) => (
-                    <div
-                      key={`${group.category}-${group.locationLabel}-${index}`}
-                      className="rounded-[22px] border border-[color:rgba(211,122,51,0.3)] bg-[color:rgba(211,122,51,0.08)] p-4"
-                    >
-                      <div className="text-[11px] uppercase tracking-[0.2em] text-[color:var(--ink-muted)]">
-                        {group.scope} · {group.locationLabel ?? selectedPort.name}
-                      </div>
-                      <div className="mt-2 text-base font-semibold text-[color:var(--ink-main)]">
-                        {CATEGORY_LABELS[group.category] ?? group.category}
-                      </div>
-                      <div className="mt-3 space-y-2">
-                        {group.facts.map((fact) => (
-                          <div key={fact.id} className="rounded-[18px] bg-[color:rgba(9,26,36,0.74)] px-3 py-3">
-                            <div className="text-sm font-medium text-[color:var(--ink-main)]">
-                              {valueForConflict(fact)}
-                            </div>
-                            <div className="mt-1 text-xs uppercase tracking-[0.16em] text-[color:var(--ink-muted)]">
-                              {sourceDisplayName(fact.source)} · {formatDate(factDisplayDate(fact))}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="rounded-[28px] border border-[color:var(--line-strong)] bg-[color:rgba(8,24,33,0.82)] p-5">
-              <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">Source timeline</div>
-              <h3 className="mt-2 text-xl font-semibold text-[color:var(--ink-main)]">Recent evidence</h3>
-              <div className="mt-5 space-y-3">
-                {sourceMoments.length === 0 ? (
-                  <p className="text-sm text-[color:var(--ink-soft)]">No source records yet for this port.</p>
-                ) : (
-                  sourceMoments.slice(0, 10).map((item) => (
-                    <div
-                      key={item.sourceRecordId}
-                      className="rounded-[22px] border border-[color:var(--line-soft)] bg-[color:rgba(7,24,32,0.74)] p-4"
-                    >
-                      <div className="text-sm font-semibold text-[color:var(--ink-main)]">{item.source}</div>
-                      <div className="mt-1 text-xs uppercase tracking-[0.18em] text-[color:var(--ink-muted)]">
-                        {item.label} · {formatDate(item.sourceDate)}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </section>
-          </aside>
         </div>
       </div>
 
