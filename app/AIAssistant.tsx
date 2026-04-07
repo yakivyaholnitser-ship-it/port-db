@@ -422,7 +422,7 @@ export default function AIAssistant({
 
 Use this exact evidence-first structure:
 
-1. Start with the key restriction and production categories only.
+1. Cover every category that exists inside the selected context. Do not limit the summary only to restrictions or production if other categories are present.
 2. For each category, list repeated values with mention counts in this style:
    - 10.0 m — 4 mentions
    - 10.5 m — 12 mentions
@@ -431,7 +431,8 @@ Use this exact evidence-first structure:
 4. Only after that, add one short evidence note if useful.
 5. Do not lead with a narrative paragraph.
 6. Do not hide repeated values behind wording like "varies" when exact counts can be shown.
-7. For draft/density/air draft/LOA/beam/DWT/rates/gangs/shifts, count the actual observed values and show the counts directly.`
+7. For draft/density/air draft/LOA/beam/DWT/rates/gangs/shifts, count the actual observed values and show the counts directly.
+8. If a category has only one observation, still include it briefly instead of skipping it.`
     );
   }
 

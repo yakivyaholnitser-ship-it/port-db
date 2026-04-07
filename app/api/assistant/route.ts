@@ -138,10 +138,12 @@ Rules:
 - Example: grain elevator / grain loader / grain spout / grain terminal wording is strong evidence that a terminal is grain-capable, even if the raw fact does not literally say "cargo = grain".
 - Freight markets and weather routing are outside scope.
 - If the user asks for a "Summary overview", do not default to a narrative summary. Prefer a compact evidence format:
-  1. category name
+  1. every category present in the selected context
   2. repeated values with mention counts
   3. latest 5 mentions with dates
   4. a short evidence note only if useful
+- Do not silently skip categories just because they are not core restriction or production categories.
+- If a category has only one observation, include it briefly.
 - For draft, density, air draft, LOA, beam, DWT, rates, gangs, and shifts, prioritize count-based evidence over prose.
 - When the user's question implies selecting or filtering ports on the map, return the matching port names in highlightedPorts.
 - Only include port names that exist in the provided DB context.
@@ -402,8 +404,18 @@ function compareNumeric(actual: number, comparator: "gt" | "gte" | "lt" | "lte",
   return actual <= threshold;
 }
 
+function isSummaryOverviewRequest(question: string) {
+  const normalized = question.toLowerCase();
+  return (
+    normalized.includes("summary overview for") ||
+    normalized.includes("use this exact evidence-first structure") ||
+    normalized.includes("latest 5 mentions for that category")
+  );
+}
+
 function parseDeterministicFilters(question: string): DeterministicFilter[] {
   const lower = question.toLowerCase();
+  if (isSummaryOverviewRequest(question)) return [];
   const filters: DeterministicFilter[] = [];
 
   for (const config of NUMERIC_PARAMETER_CONFIG) {
@@ -743,6 +755,7 @@ export async function POST(req: NextRequest) {
       body.messages;
     const latestUserMessage =
       [...incomingMessages].reverse().find((message) => message.role === "user")?.content ?? "";
+    const isSummaryRequest = isSummaryOverviewRequest(latestUserMessage);
     const deterministicFilters = parseDeterministicFilters(latestUserMessage);
 
     const ports = await prisma.port.findMany({
@@ -770,7 +783,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (deterministicFilters.length > 0 && /\bports?\b|порты/i.test(latestUserMessage)) {
+    if (!isSummaryRequest && deterministicFilters.length > 0 && /\bports?\b|порты/i.test(latestUserMessage)) {
       const deterministic = buildDeterministicFilterAnswer({
         ports,
         filters: deterministicFilters,
