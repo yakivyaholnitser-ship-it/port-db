@@ -30,6 +30,12 @@ type AssistantPortDetail = {
 type Message = {
   role: "user" | "assistant";
   content: string;
+  matchedPorts?: string[];
+  matchedLocations?: {
+    portName: string;
+    terminalName?: string;
+    berthName?: string;
+  }[];
 };
 
 function contextLabel(args: {
@@ -50,14 +56,127 @@ function contextLabel(args: {
   return args.port.name;
 }
 
+function groupLocationsByPort(
+  locations: {
+    portName: string;
+    terminalName?: string;
+    berthName?: string;
+  }[]
+) {
+  const deduped = Array.from(
+    new Map(
+      locations.map((location) => [
+        `${location.portName}__${location.terminalName ?? ""}__${location.berthName ?? ""}`,
+        location,
+      ])
+    ).values()
+  );
+
+  const grouped = new Map<
+    string,
+    {
+      portName: string;
+      locations: {
+        portName: string;
+        terminalName?: string;
+        berthName?: string;
+      }[];
+    }
+  >();
+
+  for (const location of deduped) {
+    if (!grouped.has(location.portName)) {
+      grouped.set(location.portName, {
+        portName: location.portName,
+        locations: [],
+      });
+    }
+    grouped.get(location.portName)!.locations.push(location);
+  }
+
+  return Array.from(grouped.values()).map((group) => ({
+    ...group,
+    locations: group.locations.sort((a, b) => {
+      const aLabel = a.berthName
+        ? `${a.terminalName ?? ""} ${a.berthName}`
+        : a.terminalName ?? a.portName;
+      const bLabel = b.berthName
+        ? `${b.terminalName ?? ""} ${b.berthName}`
+        : b.terminalName ?? b.portName;
+      return aLabel.localeCompare(bLabel);
+    }),
+  }));
+}
+
+function normalizeLabel(value: string) {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function portGroupForLine(
+  line: string,
+  groups: ReturnType<typeof groupLocationsByPort>
+) {
+  const match = line.match(/^- ([^:]+):$/);
+  if (!match) return null;
+  const raw = match[1] ?? "";
+
+  return (
+    groups.find((group) => {
+      const portName = group.portName;
+      return (
+        normalizeLabel(raw) === normalizeLabel(portName) ||
+        normalizeLabel(raw).startsWith(`${normalizeLabel(portName)},`)
+      );
+    }) ?? null
+  );
+}
+
+function locationLineForMatch(location: {
+  portName: string;
+  terminalName?: string;
+  berthName?: string;
+}) {
+  if (location.berthName && location.terminalName) {
+    if (normalizeLabel(location.terminalName) === normalizeLabel(location.portName)) {
+      return `${location.portName} > ${location.berthName}`;
+    }
+    return `${location.terminalName} > ${location.berthName}`;
+  }
+  if (location.terminalName) {
+    return location.terminalName;
+  }
+  return location.portName;
+}
+
+function locationMatchForLine(
+  line: string,
+  locations: {
+    portName: string;
+    terminalName?: string;
+    berthName?: string;
+  }[]
+) {
+  const normalizedLine = normalizeLabel(line);
+  return (
+    locations.find((location) => {
+      const label = normalizeLabel(locationLineForMatch(location));
+      return normalizedLine.includes(label);
+    }) ?? null
+  );
+}
+
 export default function AIAssistant({
   ports,
   initialPortId,
   onHighlightPorts,
+  onOpenPort,
+  onOpenLocation,
 }: {
   ports: PortOption[];
   initialPortId?: number | null;
   onHighlightPorts: (ports: string[]) => void;
+  onOpenPort: (portName: string) => void;
+  onOpenLocation: (location: { portName: string; terminalName?: string; berthName?: string }) => void;
 }) {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([
@@ -197,6 +316,24 @@ export default function AIAssistant({
     return `Focus only on port "${selectedPort.name}". Ignore all other ports unless explicitly asked to compare them.`;
   }
 
+  function shouldUseGlobalScope(question: string) {
+    const lower = question.toLowerCase();
+    return (
+      /\ball ports\b/.test(lower) ||
+      /\bwhich ports\b/.test(lower) ||
+      /\bwhat ports\b/.test(lower) ||
+      /\bports where\b/.test(lower) ||
+      /\bshow ports\b/.test(lower) ||
+      /\bacross all ports\b/.test(lower) ||
+      /\bcompare ports\b/.test(lower) ||
+      /все порты/.test(lower) ||
+      /какие порты/.test(lower) ||
+      /порты где/.test(lower) ||
+      /по всем портам/.test(lower) ||
+      /среди портов/.test(lower)
+    );
+  }
+
   async function ask(questionOverride?: string) {
     const q = (questionOverride ?? input).trim();
     if (!q) return;
@@ -204,7 +341,9 @@ export default function AIAssistant({
     setError(null);
     setIsAsking(true);
 
-    const contextualQuestion = `${buildContextInstruction()}\n\n${q}`;
+    const contextualQuestion = shouldUseGlobalScope(q)
+      ? `Use the whole database for this question. Do not limit yourself to the currently selected port unless the user explicitly narrows the scope.\n\n${q}`
+      : `${buildContextInstruction()}\n\n${q}`;
     const nextMessages: Message[] = [...messages, { role: "user", content: q }];
     setMessages(nextMessages);
 
@@ -230,17 +369,35 @@ export default function AIAssistant({
         return;
       }
 
+      const explicitHighlightedPorts = Array.isArray(data?.highlightedPorts)
+        ? data.highlightedPorts.filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0)
+        : [];
+      const matchedLocations = Array.isArray(data?.matchedLocations)
+        ? data.matchedLocations.filter(
+            (item: unknown): item is { portName: string; terminalName?: string; berthName?: string } =>
+              Boolean(item) &&
+              typeof item === "object" &&
+              typeof (item as { portName?: unknown }).portName === "string"
+          )
+        : [];
       const answer = String(data?.answer || "").trim();
+      const mentioned = detectMentionedPorts(answer);
       const assistantMsg: Message = {
         role: "assistant",
         content: answer || "(No answer returned.)",
+        matchedPorts: explicitHighlightedPorts.length
+          ? explicitHighlightedPorts
+          : mentioned.length
+            ? mentioned
+            : selectedPort
+              ? [selectedPort.name]
+              : [],
+        matchedLocations,
       };
-
       setMessages((prev) => [...prev, assistantMsg]);
       setInput("");
-
-      const mentioned = detectMentionedPorts(answer);
-      if (mentioned.length) onHighlightPorts(mentioned);
+      if (explicitHighlightedPorts.length) onHighlightPorts(explicitHighlightedPorts);
+      else if (mentioned.length) onHighlightPorts(mentioned);
       else if (selectedPort) onHighlightPorts([selectedPort.name]);
     } catch (e) {
       console.error(e);
@@ -380,22 +537,75 @@ Use this exact evidence-first structure:
               <div className="whitespace-pre-wrap">{m.content}</div>
             ) : (
               <div className="space-y-1">
-                {m.content.split("\n").map((line, i) => {
-                  if (line.startsWith("⚠️")) {
+                {(() => {
+                  const groupedLocations = groupLocationsByPort(m.matchedLocations ?? []);
+                  return m.content.split("\n").map((line, i) => {
+                    const inlineGroup = portGroupForLine(line, groupedLocations);
+                    const inlineLocation = locationMatchForLine(line, m.matchedLocations ?? []);
+
+                    if (line.startsWith("⚠️")) {
+                      return (
+                        <div key={i} className="bg-yellow-950/40 border border-yellow-600/50 rounded px-3 py-2">
+                          {line}
+                        </div>
+                      );
+                    }
+                    if (line.startsWith("•")) {
+                      return <div key={i} className="pl-4">{line}</div>;
+                    }
+                    if (line.startsWith("→")) {
+                      return <div key={i} className="text-emerald-400">{line}</div>;
+                    }
+
                     return (
-                      <div key={i} className="bg-yellow-950/40 border border-yellow-600/50 rounded px-3 py-2">
-                        {line}
+                      <div key={i} className="group space-y-2">
+                        <div>{line}</div>
+                        {inlineGroup ? (
+                          <div className="flex max-h-0 flex-wrap items-center gap-2 overflow-hidden pl-2 opacity-0 transition-all duration-150 group-hover:max-h-40 group-hover:opacity-100">
+                            <button
+                              type="button"
+                              onClick={() => onOpenPort(inlineGroup.portName)}
+                              className="rounded-full border border-[color:rgba(113,194,183,0.38)] bg-[color:rgba(113,194,183,0.14)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[color:var(--accent-soft)] transition hover:bg-[color:rgba(113,194,183,0.22)]"
+                            >
+                              {inlineGroup.portName}
+                            </button>
+                            {inlineGroup.locations
+                              .filter((location) => location.terminalName || location.berthName)
+                              .map((location, locationIndex) => {
+                                const label = location.berthName
+                                  ? `${location.terminalName ?? "Berth"} → ${location.berthName}`
+                                  : `${location.terminalName}`;
+
+                                return (
+                                  <button
+                                    key={`${i}-${inlineGroup.portName}-${locationIndex}-${label}`}
+                                    type="button"
+                                    onClick={() => onOpenLocation(location)}
+                                    className="rounded-full border border-[color:rgba(124,150,196,0.22)] bg-[color:rgba(124,150,196,0.06)] px-2.5 py-1 text-[9px] uppercase tracking-[0.14em] text-[color:#b9c7ef] transition hover:bg-[color:rgba(124,150,196,0.14)]"
+                                  >
+                                    {label}
+                                  </button>
+                                );
+                              })}
+                          </div>
+                        ) : null}
+                        {!inlineGroup && inlineLocation ? (
+                          <div className="flex max-h-0 flex-wrap items-center gap-2 overflow-hidden pl-2 opacity-0 transition-all duration-150 group-hover:max-h-20 group-hover:opacity-100">
+                            <button
+                              type="button"
+                              onClick={() => onOpenLocation(inlineLocation)}
+                              className="rounded-full border border-[color:rgba(124,150,196,0.24)] bg-[color:rgba(124,150,196,0.08)] px-2.5 py-1 text-[9px] uppercase tracking-[0.14em] text-[color:#b9c7ef] transition hover:bg-[color:rgba(124,150,196,0.16)]"
+                            >
+                              {inlineLocation.berthName
+                                ? `Open ${inlineLocation.terminalName ?? inlineLocation.portName} → ${inlineLocation.berthName}`
+                                : `Open ${inlineLocation.terminalName ?? inlineLocation.portName}`}
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     );
-                  }
-                  if (line.startsWith("•")) {
-                    return <div key={i} className="pl-4">{line}</div>;
-                  }
-                  if (line.startsWith("→")) {
-                    return <div key={i} className="text-emerald-400">{line}</div>;
-                  }
-                  return <div key={i}>{line}</div>;
-                })}
+                  });
+                })()}
               </div>
             )}
           </div>

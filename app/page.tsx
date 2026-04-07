@@ -658,6 +658,7 @@ export default function PortsPage() {
   const [expandedCategoryKeys, setExpandedCategoryKeys] = useState<string[]>([]);
   const [showIngest, setShowIngest] = useState(false);
   const [showAllPorts, setShowAllPorts] = useState(false);
+  const [highlightedPorts, setHighlightedPorts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1195,7 +1196,26 @@ export default function PortsPage() {
                       country: port.country,
                     }))}
                     initialPortId={selectedPortId}
-                    onHighlightPorts={() => {}}
+                    onHighlightPorts={setHighlightedPorts}
+                    onOpenPort={(portName) => {
+                      const matched = ports.find(
+                        (port) => port.name.toLowerCase() === portName.toLowerCase()
+                      );
+                      if (matched) {
+                        setSelectedPortId(matched.id);
+                        setSelectedTerminalName(null);
+                        setSelectedBerthName(null);
+                      }
+                    }}
+                    onOpenLocation={({ portName, terminalName, berthName }) => {
+                      const matched = ports.find(
+                        (port) => port.name.toLowerCase() === portName.toLowerCase()
+                      );
+                      if (!matched) return;
+                      setSelectedPortId(matched.id);
+                      setSelectedTerminalName(terminalName ?? null);
+                      setSelectedBerthName(berthName ?? null);
+                    }}
                   />
                 </div>
               </div>
@@ -1261,7 +1281,7 @@ export default function PortsPage() {
               <div className="h-[350px] overflow-hidden px-4 py-4 lg:px-5">
                 <PortsMap
                   entries={mapEntries}
-                  highlightedPorts={selectedPort ? [selectedPort.name] : []}
+                  highlightedPorts={highlightedPorts}
                   selectedPortId={selectedPortId}
                   selectedPortStructure={visibleSelectedTerminals.map((terminal) => ({
                     name: terminal.name,
