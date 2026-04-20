@@ -15,6 +15,7 @@ import {
 } from "@/lib/location-intelligence";
 import { normalizeParentChildLocationNames } from "@/lib/location-postprocessing";
 import { geocodePortCoordinates } from "@/lib/geocoding";
+import { normalizeBunkerFact } from "@/lib/bunker-semantics";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -47,6 +48,8 @@ Rules:
 - If the text explicitly states country or a strong geography hint like "USA", "United States", "Canada", "WA", "BC", or "Washington", extract the correct sovereign country.
 - If terminal or berth is not stated, return null.
 - If different facts refer to different terminals or berths in the same message, set terminal/berth on each fact individually.
+- If the message contains a table, treat each table row as its own location context and carry that row's berth/terminal across every fact extracted from that row.
+- For row labels like "YARA (South)", "YARA (North)", "West Berth", or "Commercial pier", attach every row-specific draft / DWT / LOA / beam / equipment / rate fact to that exact berth or row location, not just the parent terminal.
 - Use the top-level terminal/berth only when the whole message clearly refers to one single location.
 - Short operational updates like "LB212 draft now 16m FW" or "LB214 max draft 12.8m SW" must still be resolved into the correct port/terminal/berth.
 - Preserve compact real-world location IDs like "LB212", "LB214", "G3", "B12" when they are the actual terminal or berth label.
@@ -56,6 +59,7 @@ Rules:
 - If a fact applies to the whole port, set scope to "port".
 - Do not confuse "draft survey" with draft restriction. "Draft survey", "shore scale", and cargo quantity determination belong to survey/other, not draft.
 - Do not confuse WLTHC, topping height, hatch topping measurements, or grain-capacity topping limits with UKC. Those belong to hatch_height / restriction, not under-keel clearance.
+- Do not store bunker fuel sulphur or bunker fuel specification as category "bunker". Bunkering place/location belongs to "bunker"; sulphur limit or fuel spec belongs to "sulphur".
 - Valid categories include: draft, density, discharge_rate, load_rate, tide, equipment, gangs, shifts, cargo, restriction, customs, bunker, cleaning, survey, ukc, hatch_height, freeboard, trim, loa, beam, dwt, air_draft, production, sulphur, transit, distance_ps_to_anchorage, distance_ps_to_berth, cost, other.
 - Capture operationally important details even if they do not fit a standard bucket; use category "other" when needed.
 - Never drop a meaningful operational constraint or note.
@@ -92,6 +96,55 @@ const CANADA_REGION_CODES = new Set([
   "AB","BC","MB","NB","NL","NS","NT","NU","ON","PE","QC","SK","YT",
 ]);
 
+const COUNTRY_ALIASES: Array<{ canonical: string; patterns: RegExp[] }> = [
+  {
+    canonical: "USA",
+    patterns: [
+      /\bunited states of america\b/i,
+      /\bunited states\b/i,
+      /\bu\.s\.a\.?\b/i,
+      /(?:^|[,\s(])usa(?:$|[,\s)])/i,
+      /\bu\.s\.\b/i,
+    ],
+  },
+  {
+    canonical: "Canada",
+    patterns: [/\bcanada\b/i],
+  },
+  {
+    canonical: "Brazil",
+    patterns: [/\bbrazil\b/i, /\bbrasil\b/i],
+  },
+  {
+    canonical: "Uruguay",
+    patterns: [/\buruguay\b/i],
+  },
+  {
+    canonical: "Argentina",
+    patterns: [/\bargentina\b/i],
+  },
+  {
+    canonical: "China",
+    patterns: [/\bchina\b/i],
+  },
+  {
+    canonical: "Australia",
+    patterns: [/\baustralia\b/i],
+  },
+  {
+    canonical: "India",
+    patterns: [/\bindia\b/i],
+  },
+  {
+    canonical: "Qatar",
+    patterns: [/\bqatar\b/i],
+  },
+  {
+    canonical: "South Africa",
+    patterns: [/\bsouth africa\b/i],
+  },
+];
+
 function normalizeCountryName(value: string | null | undefined): string | null {
   if (!value) return null;
   const normalized = value.trim().toLowerCase();
@@ -114,6 +167,38 @@ function normalizeCountryName(value: string | null | undefined): string | null {
     return "Canada";
   }
 
+  if (normalized === "brazil" || normalized === "brasil") {
+    return "Brazil";
+  }
+
+  if (normalized === "uruguay") {
+    return "Uruguay";
+  }
+
+  if (normalized === "argentina") {
+    return "Argentina";
+  }
+
+  if (normalized === "china") {
+    return "China";
+  }
+
+  if (normalized === "australia") {
+    return "Australia";
+  }
+
+  if (normalized === "india") {
+    return "India";
+  }
+
+  if (normalized === "qatar") {
+    return "Qatar";
+  }
+
+  if (normalized === "south africa") {
+    return "South Africa";
+  }
+
   return value.trim();
 }
 
@@ -121,18 +206,10 @@ function inferCountryFromText(text: string, extractedCountry: string | null): st
   const explicitCountry = normalizeCountryName(extractedCountry);
   if (explicitCountry) return explicitCountry;
 
-  const lower = text.toLowerCase();
-  if (
-    /\bunited states of america\b/.test(lower) ||
-    /\bunited states\b/.test(lower) ||
-    /\bu\.s\.a\.?\b/.test(lower) ||
-    /(?:^|[,\s(])usa(?:$|[,\s)])/i.test(text)
-  ) {
-    return "USA";
-  }
-
-  if (/\bcanada\b/.test(lower)) {
-    return "Canada";
+  for (const country of COUNTRY_ALIASES) {
+    if (country.patterns.some((pattern) => pattern.test(text))) {
+      return country.canonical;
+    }
   }
 
   const regionCodeMatches = Array.from(text.matchAll(/(?:^|[,\s(])([A-Z]{2})(?:$|[,\s)])/g)).map(
@@ -353,6 +430,45 @@ function parseSourceDateInput(value: string | undefined) {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function normalizeExtractedOperationalFact(fact: ExtractedFact): ExtractedLocationFact {
+  const baseCategory = fact.category!.trim();
+  const baseValue = fact.value!.trim();
+  const baseNotes = fact.notes?.trim() || null;
+  const baseRawSnippet = fact.rawSnippet?.trim() || null;
+
+  if (baseCategory.toLowerCase() === "bunker") {
+    const normalized = normalizeBunkerFact({
+      category: baseCategory,
+      value: baseValue,
+      unit: fact.unit?.trim() || null,
+      notes: baseNotes,
+      rawSnippet: baseRawSnippet,
+    });
+
+    return {
+      scope: fact.scope ?? null,
+      terminal: fact.terminal ?? null,
+      berth: fact.berth ?? null,
+      category: normalized.category,
+      value: normalized.value.trim(),
+      unit: fact.unit?.trim() || null,
+      notes: normalized.notes?.trim() || null,
+      rawSnippet: normalized.rawSnippet?.trim() || null,
+    };
+  }
+
+  return {
+    scope: fact.scope ?? null,
+    terminal: fact.terminal ?? null,
+    berth: fact.berth ?? null,
+    category: baseCategory,
+    value: baseValue,
+    unit: fact.unit?.trim() || null,
+    notes: baseNotes,
+    rawSnippet: baseRawSnippet,
+  };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -508,16 +624,7 @@ export async function POST(req: NextRequest) {
             (fact): fact is ExtractedFact =>
               Boolean(fact?.category?.trim()) && Boolean(fact?.value?.trim())
           )
-          .map((fact) => ({
-            scope: fact.scope ?? null,
-            terminal: fact.terminal ?? null,
-            berth: fact.berth ?? null,
-            category: fact.category!.trim(),
-            value: fact.value!.trim(),
-            unit: fact.unit?.trim() || null,
-            notes: fact.notes?.trim() || null,
-            rawSnippet: fact.rawSnippet?.trim() || null,
-          }))
+          .map((fact) => normalizeExtractedOperationalFact(fact))
       : [];
 
     const locationResolution = await resolveLocationIntelligence({

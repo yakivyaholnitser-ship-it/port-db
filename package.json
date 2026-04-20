@@ -11,6 +11,9 @@
     "seed:global-location-fixtures": "node scripts/seed_global_location_fixtures.js",
     "seed:global-condition-fixtures": "node scripts/seed_global_condition_fixtures.js",
     "test:condition-regression": "node scripts/condition_regression.js",
+    "test:bunker-semantics": "node --experimental-strip-types scripts/bunker_semantics_regression.js",
+    "test:assistant-bunker": "node scripts/assistant_bunker_regression.js",
+    "backfill:bunker-semantics": "node --experimental-strip-types scripts/backfill_bunker_semantics.js",
     "backfill:port-coordinates": "node scripts/backfill_port_coordinates.js",
     "refresh:port-coordinates": "node scripts/backfill_port_coordinates.js --refresh-all"
   },

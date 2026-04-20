@@ -33,6 +33,7 @@ type Message = {
   matchedPorts?: string[];
   matchedLocations?: {
     portName: string;
+    portCountry?: string;
     terminalName?: string;
     berthName?: string;
   }[];
@@ -59,6 +60,7 @@ function contextLabel(args: {
 function groupLocationsByPort(
   locations: {
     portName: string;
+    portCountry?: string;
     terminalName?: string;
     berthName?: string;
   }[]
@@ -66,7 +68,7 @@ function groupLocationsByPort(
   const deduped = Array.from(
     new Map(
       locations.map((location) => [
-        `${location.portName}__${location.terminalName ?? ""}__${location.berthName ?? ""}`,
+        `${location.portName}__${location.portCountry ?? ""}__${location.terminalName ?? ""}__${location.berthName ?? ""}`,
         location,
       ])
     ).values()
@@ -76,8 +78,10 @@ function groupLocationsByPort(
     string,
     {
       portName: string;
+      portCountry?: string;
       locations: {
         portName: string;
+        portCountry?: string;
         terminalName?: string;
         berthName?: string;
       }[];
@@ -85,13 +89,15 @@ function groupLocationsByPort(
   >();
 
   for (const location of deduped) {
-    if (!grouped.has(location.portName)) {
-      grouped.set(location.portName, {
+    const groupKey = `${location.portName}__${location.portCountry ?? ""}`;
+    if (!grouped.has(groupKey)) {
+      grouped.set(groupKey, {
         portName: location.portName,
+        portCountry: location.portCountry,
         locations: [],
       });
     }
-    grouped.get(location.portName)!.locations.push(location);
+    grouped.get(groupKey)!.locations.push(location);
   }
 
   return Array.from(grouped.values()).map((group) => ({
@@ -123,9 +129,13 @@ function portGroupForLine(
   return (
     groups.find((group) => {
       const portName = group.portName;
+      const displayLabel = group.portCountry ? `${group.portName}, ${group.portCountry}` : group.portName;
       return (
-        normalizeLabel(raw) === normalizeLabel(portName) ||
-        normalizeLabel(raw).startsWith(`${normalizeLabel(portName)},`)
+        normalizeLabel(raw) === normalizeLabel(displayLabel) ||
+        normalizeLabel(raw).startsWith(`${normalizeLabel(displayLabel)}:`) ||
+        (!group.portCountry &&
+          (normalizeLabel(raw) === normalizeLabel(portName) ||
+            normalizeLabel(raw).startsWith(`${normalizeLabel(portName)},`)))
       );
     }) ?? null
   );
@@ -152,6 +162,7 @@ function locationMatchForLine(
   line: string,
   locations: {
     portName: string;
+    portCountry?: string;
     terminalName?: string;
     berthName?: string;
   }[]
@@ -175,8 +186,8 @@ export default function AIAssistant({
   ports: PortOption[];
   initialPortId?: number | null;
   onHighlightPorts: (ports: string[]) => void;
-  onOpenPort: (portName: string) => void;
-  onOpenLocation: (location: { portName: string; terminalName?: string; berthName?: string }) => void;
+  onOpenPort: (portName: string, portCountry?: string) => void;
+  onOpenLocation: (location: { portName: string; portCountry?: string; terminalName?: string; berthName?: string }) => void;
 }) {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([
@@ -322,6 +333,9 @@ export default function AIAssistant({
       /\ball ports\b/.test(lower) ||
       /\bwhich ports\b/.test(lower) ||
       /\bwhat ports\b/.test(lower) ||
+      /\bwhere is\b/.test(lower) ||
+      /\bwhere are\b/.test(lower) ||
+      /\bwhere can i find\b/.test(lower) ||
       /\bports where\b/.test(lower) ||
       /\bshow ports\b/.test(lower) ||
       /\bacross all ports\b/.test(lower) ||
@@ -374,7 +388,7 @@ export default function AIAssistant({
         : [];
       const matchedLocations = Array.isArray(data?.matchedLocations)
         ? data.matchedLocations.filter(
-            (item: unknown): item is { portName: string; terminalName?: string; berthName?: string } =>
+            (item: unknown): item is { portName: string; portCountry?: string; terminalName?: string; berthName?: string } =>
               Boolean(item) &&
               typeof item === "object" &&
               typeof (item as { portName?: unknown }).portName === "string"
@@ -565,10 +579,11 @@ Use this exact evidence-first structure:
                           <div className="flex max-h-0 flex-wrap items-center gap-2 overflow-hidden pl-2 opacity-0 transition-all duration-150 group-hover:max-h-40 group-hover:opacity-100">
                             <button
                               type="button"
-                              onClick={() => onOpenPort(inlineGroup.portName)}
+                              onClick={() => onOpenPort(inlineGroup.portName, inlineGroup.portCountry)}
                               className="rounded-full border border-[color:rgba(113,194,183,0.38)] bg-[color:rgba(113,194,183,0.14)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[color:var(--accent-soft)] transition hover:bg-[color:rgba(113,194,183,0.22)]"
                             >
                               {inlineGroup.portName}
+                              {inlineGroup.portCountry ? `, ${inlineGroup.portCountry}` : ""}
                             </button>
                             {inlineGroup.locations
                               .filter((location) => location.terminalName || location.berthName)

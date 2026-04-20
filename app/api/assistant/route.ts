@@ -6,6 +6,12 @@ import { getDatabaseUnavailableMessage, getSchemaMismatchMessage } from "@/lib/d
 import { buildOperationalView } from "@/lib/operational-view";
 import { conditionTagsFromParsed, parseOperationalConditions } from "@/lib/condition-parsing";
 import { inferCapabilities } from "@/lib/capability-inference";
+import {
+  BunkerMode,
+  bunkerModeLabel,
+  isBunkerLocationFact,
+  parseBunkerModes,
+} from "@/lib/bunker-semantics";
 
 type FactForFilters = {
   category: string;
@@ -50,6 +56,14 @@ type NumericFilter = {
   displayThreshold: string;
 };
 
+type NumericRangeFilter = {
+  kind: "numeric_range";
+  parameter: NumericParameter;
+  minThreshold: number;
+  maxThreshold: number;
+  displayRange: string;
+};
+
 type CapabilityFilter = {
   kind: "capability";
   capability: string;
@@ -62,12 +76,85 @@ type ConditionFilter = {
   displayLabel: string;
 };
 
-type DeterministicFilter = NumericFilter | CapabilityFilter | ConditionFilter;
+type CountryFilter = {
+  kind: "country";
+  country: string;
+  displayLabel: string;
+};
+
+type DeterministicFilter =
+  | NumericFilter
+  | NumericRangeFilter
+  | CapabilityFilter
+  | ConditionFilter
+  | CountryFilter;
+
+type DeterministicQuery = {
+  filters: DeterministicFilter[];
+  mode: "and" | "or";
+  scope: "port" | "terminal" | "berth";
+  portContextName?: string;
+  terminalContextName?: string;
+  negateCapabilities: string[];
+  negateConditions: string[];
+};
+
+type SemanticPlannerFilter =
+  | {
+      type: "numeric";
+      category: NumericParameter;
+      operator: "gt" | "gte" | "lt" | "lte" | "between";
+      value?: number;
+      min?: number;
+      max?: number;
+      unit?: string;
+    }
+  | {
+      type: "capability";
+      capability: string;
+      mode: "include" | "exclude";
+    }
+  | {
+      type: "condition";
+      condition: string;
+      mode: "include" | "exclude";
+    }
+  | {
+      type: "country";
+      country: string;
+    };
+
+type SemanticPlannerResult = {
+  intent: "filter" | "other";
+  scope: "port" | "terminal" | "berth";
+  combineMode: "and" | "or";
+  locationContext?: {
+    port?: string;
+    terminal?: string;
+  };
+  filters: SemanticPlannerFilter[];
+};
 
 type MatchedLocation = {
   portName: string;
+  portCountry?: string;
   terminalName?: string;
   berthName?: string;
+};
+
+type BunkerIntent =
+  | "anchorage_only"
+  | "alongside_allowed"
+  | "alongside_only"
+  | "barge_only"
+  | "not_available"
+  | "mixed";
+
+type ParsedBunkerQuestion = {
+  intent: BunkerIntent;
+  scope: "port" | "terminal" | "berth";
+  portContextName?: string;
+  terminalContextName?: string;
 };
 
 type ResultRow = {
@@ -149,6 +236,12 @@ Rules:
 - Only include port names that exist in the provided DB context.
 - For threshold/filter questions like "which ports have draft over 13m", list only the matching ports by default.
 - Do not include excluded ports, near misses, or "below threshold" examples unless the user explicitly asks for exclusions or comparison.
+- For bunkering-location questions, treat anchorage, alongside, truck, and barge as different meanings. Do not collapse them together.
+- "Alongside" means bunkering at berth / alongside the vessel. It is not the same as anchorage.
+- If the user asks whether bunkering is allowed alongside, a match may include "Bunkering only alongside" or "Bunkering at anchorage or alongside", but not "Bunkering only at anchorage".
+- If the user asks whether bunkering is only at anchorage, match only clearly anchorage-only evidence. Do not include mixed or dual-mode arrangements as clean matches.
+- If a port has mixed bunker arrangements across terminals or berths, do not flatten that into a clean whole-port answer. Answer at terminal/berth level or explicitly say the port is mixed by location.
+- For bunker questions, prefer [BUNKER MODE ...] lines over raw bunker text when both are present.
 `.trim();
 
 function fmtDate(d: Date | null | undefined): string {
@@ -158,6 +251,366 @@ function fmtDate(d: Date | null | undefined): string {
     month: "short",
     year: "numeric",
   });
+}
+
+function buildBunkerModeContextLines(port: PortForFilters) {
+  const lines = port.facts
+    .map((fact) => ({
+      fact,
+      modes: resolvedBunkerModesForFact(fact),
+    }))
+    .filter((item) => item.modes.size > 0)
+    .map((item) => {
+      const label = scopeLabel(
+        port.name,
+        item.fact.scope,
+        item.fact.terminal?.name,
+        item.fact.berth?.name
+      );
+      const date = fmtDate(item.fact.sourceRecord?.sourceDate ?? item.fact.createdAt);
+      const modeLabel = Array.from(item.modes).map(bunkerModeLabel).join(", ");
+      return `  [BUNKER MODE ${item.fact.scope}] ${label} | ${modeLabel} | ${factRawDisplayValue(
+        item.fact.value,
+        item.fact.unit
+      )} (${date})`;
+    });
+
+  return lines;
+}
+
+function resolvedBunkerModesForFact(fact: Pick<FactForFilters, "category" | "value" | "unit" | "notes" | "rawSnippet">) {
+  const normalizedMatch = (fact.notes ?? "")
+    .match(/normalized bunker mode:\s*([a-z_]+)/i)?.[1]
+    ?.trim()
+    .toLowerCase();
+
+  const normalizedModes = new Set<BunkerMode>();
+  if (
+    normalizedMatch === "anchorage_only" ||
+    normalizedMatch === "alongside_only" ||
+    normalizedMatch === "anchorage_or_alongside" ||
+    normalizedMatch === "truck_only" ||
+    normalizedMatch === "barge_only" ||
+    normalizedMatch === "not_available" ||
+    normalizedMatch === "conditional_mixed"
+  ) {
+    normalizedModes.add(normalizedMatch);
+  }
+
+  const parsedModes = parseBunkerModes({
+    category: fact.category,
+    value: fact.value,
+    unit: fact.unit,
+    notes: fact.notes,
+    rawSnippet: fact.rawSnippet ?? null,
+  });
+  const relaxedParsedModes = parseBunkerModes({
+    category: null,
+    value: fact.value,
+    unit: fact.unit,
+    notes: fact.notes,
+    rawSnippet: fact.rawSnippet ?? null,
+  });
+
+  if (normalizedModes.size === 0) {
+    return new Set<BunkerMode>([
+      ...Array.from(parsedModes),
+      ...Array.from(relaxedParsedModes),
+    ]);
+  }
+
+  return new Set<BunkerMode>([
+    ...Array.from(normalizedModes),
+    ...Array.from(parsedModes),
+    ...Array.from(relaxedParsedModes),
+  ]);
+}
+
+function isBunkerQuestion(question: string) {
+  return /\bbunker(?:ing|s?)\b|\bfuell?ing\b|\brefuel(?:ling|ing)?\b/i.test(question);
+}
+
+function bunkerQuestionInstruction(question: string) {
+  if (!isBunkerQuestion(question)) return "";
+
+  const normalized = question.trim().toLowerCase();
+  const asksAnchorageOnly =
+    /\bonly at anchorage\b|\bat anchorage only\b|\banchorage only\b/.test(normalized);
+  const asksAlongside =
+    /\balongside\b|\bat berth\b/.test(normalized);
+  const asksOnly = /\bonly\b/.test(normalized);
+
+  const scopedRules = [
+    "Bunker-question rules:",
+    "- Use normalized bunker-mode evidence as the primary grounding when available.",
+    "- Keep port-level, terminal-level, and berth-level bunker answers separate.",
+  ];
+
+  if (asksAnchorageOnly) {
+    scopedRules.push(
+      '- The user is asking for anchorage-only bunkering. Match only "Bunkering only at anchorage".',
+      '- Do not include "Bunkering at anchorage or alongside", truck-only, barge-only, or conditional / mixed arrangements as clean matches.'
+    );
+  }
+
+  if (asksAlongside && !asksOnly) {
+    scopedRules.push(
+      '- The user is asking whether bunkering is allowed alongside. Include "Bunkering only alongside" and "Bunkering at anchorage or alongside".',
+      '- Do not describe an anchorage-only arrangement as allowing alongside bunkering.'
+    );
+  }
+
+  if (asksAlongside && asksOnly) {
+    scopedRules.push(
+      '- The user is asking for alongside-only bunkering. Match only "Bunkering only alongside".',
+      '- Do not include mixed anchorage/alongside arrangements.'
+    );
+  }
+
+  return `\n\n${scopedRules.join("\n")}`;
+}
+
+function parseBunkerQuestion(
+  question: string,
+  ports: PortForFilters[]
+): ParsedBunkerQuestion | null {
+  if (!isBunkerQuestion(question)) return null;
+
+  const normalized = question.trim().toLowerCase();
+  let intent: BunkerIntent | null = null;
+
+  if (/\bnot available\b|\bno bunkers?\b/.test(normalized)) {
+    intent = "not_available";
+  } else if (/\bmixed\b|\bconditional\b/.test(normalized)) {
+    intent = "mixed";
+  } else if (/\bbarge only\b|\bby barge only\b/.test(normalized)) {
+    intent = "barge_only";
+  } else if (/\bonly alongside\b|\balongside only\b/.test(normalized)) {
+    intent = "alongside_only";
+  } else if (/\bonly at anchorage\b|\bat anchorage only\b|\banchorage only\b/.test(normalized)) {
+    intent = "anchorage_only";
+  } else if (/\ballow\b.*\balongside\b|\balongside\b/.test(normalized)) {
+    intent = "alongside_allowed";
+  }
+
+  if (!intent) return null;
+
+  let scope: "port" | "terminal" | "berth" = "port";
+  if (/\bterminals?\b|терминал/i.test(question)) scope = "terminal";
+  else if (/\bberths?\b|\bpiers?\b|\bjetties\b|причал/i.test(question)) scope = "berth";
+
+  return {
+    intent,
+    scope,
+    portContextName: detectPortContext(question, ports),
+    terminalContextName: detectTerminalContext(question, ports),
+  };
+}
+
+function isQueryableBunkerLocationFact(
+  fact: Pick<FactForFilters, "category" | "value" | "unit" | "notes" | "rawSnippet">
+) {
+  if (
+    isBunkerLocationFact({
+      category: fact.category,
+      value: fact.value,
+      unit: fact.unit,
+      notes: fact.notes,
+      rawSnippet: fact.rawSnippet ?? null,
+    })
+  ) {
+    return true;
+  }
+
+  return isBunkerLocationFact({
+    category: null,
+    value: fact.value,
+    unit: fact.unit,
+    notes: fact.notes,
+    rawSnippet: fact.rawSnippet ?? null,
+  });
+}
+
+function bunkerIntentMatches(intent: BunkerIntent, modes: Set<BunkerMode>) {
+  if (intent === "anchorage_only") {
+    return modes.has("anchorage_only") && !modes.has("conditional_mixed");
+  }
+  if (intent === "alongside_allowed") {
+    return modes.has("alongside_only") || modes.has("anchorage_or_alongside");
+  }
+  if (intent === "alongside_only") {
+    return modes.has("alongside_only") && !modes.has("conditional_mixed");
+  }
+  if (intent === "barge_only") {
+    return modes.has("barge_only");
+  }
+  if (intent === "not_available") {
+    return modes.has("not_available");
+  }
+  return modes.has("conditional_mixed");
+}
+
+function bunkerIntentLabel(intent: BunkerIntent) {
+  if (intent === "anchorage_only") return "Bunkering only at anchorage";
+  if (intent === "alongside_allowed") return "Bunkering allowed alongside";
+  if (intent === "alongside_only") return "Bunkering only alongside";
+  if (intent === "barge_only") return "Bunkering by barge only";
+  if (intent === "not_available") return "No bunkers available";
+  return "Conditional / mixed bunkering arrangement";
+}
+
+function bunkerLocationLabel(
+  portName: string,
+  fact: FactForFilters,
+  requestedScope: "port" | "terminal" | "berth"
+) {
+  if (requestedScope === "berth") {
+    return [fact.terminal?.name, fact.berth?.name].filter(Boolean).join(" > ") || portName;
+  }
+  if (requestedScope === "terminal") {
+    return fact.terminal?.name || (fact.berth?.name ? [fact.terminal?.name, fact.berth?.name].filter(Boolean).join(" > ") : portName);
+  }
+  if (fact.scope === PortFactScope.PORT) return portName;
+  if (fact.scope === PortFactScope.TERMINAL) return fact.terminal?.name || portName;
+  return [fact.terminal?.name, fact.berth?.name].filter(Boolean).join(" > ") || portName;
+}
+
+function buildBunkerAnswer(args: {
+  ports: PortForFilters[];
+  query: ParsedBunkerQuestion;
+}) {
+  const rows: Array<{
+    portName: string;
+    portCountry?: string;
+    locationLabel: string;
+    fact: FactForFilters;
+    modes: Set<BunkerMode>;
+    date: string;
+  }> = [];
+
+  for (const port of args.ports) {
+    if (
+      args.query.portContextName &&
+      port.name.toLowerCase() !== args.query.portContextName.toLowerCase()
+    ) {
+      continue;
+    }
+
+    for (const fact of port.facts) {
+      if (!isQueryableBunkerLocationFact(fact)) {
+        continue;
+      }
+      if (
+        args.query.terminalContextName &&
+        (fact.terminal?.name ?? "").toLowerCase() !== args.query.terminalContextName.toLowerCase()
+      ) {
+        continue;
+      }
+
+      const modes = resolvedBunkerModesForFact(fact);
+      if (!modes.size || !bunkerIntentMatches(args.query.intent, modes)) continue;
+
+      if (args.query.scope === "terminal" && !fact.terminal?.name) continue;
+      if (args.query.scope === "berth" && !fact.berth?.name) continue;
+
+      rows.push({
+        portName: port.name,
+        portCountry: port.country ?? undefined,
+        locationLabel: bunkerLocationLabel(port.name, fact, args.query.scope),
+        fact,
+        modes,
+        date: fmtDate(fact.sourceRecord?.sourceDate ?? fact.createdAt),
+      });
+    }
+  }
+
+  const dedupedRows = Array.from(
+    new Map(
+      rows.map((row) => [
+        `${row.portName}__${row.portCountry ?? ""}__${row.locationLabel.toLowerCase()}__${Array.from(row.modes).sort().join(",")}`,
+        row,
+      ])
+    ).values()
+  ).sort((a, b) => a.portName.localeCompare(b.portName) || a.locationLabel.localeCompare(b.locationLabel));
+
+  if (dedupedRows.length === 0) {
+    return {
+      answer: `No ports in the current Port Intelligence DB match: ${bunkerIntentLabel(args.query.intent)}.`,
+      highlightedPorts: [] as string[],
+      matchedLocations: [] as MatchedLocation[],
+      resultRows: [] as ResultRow[],
+    };
+  }
+
+  const grouped = new Map<string, typeof dedupedRows>();
+  for (const row of dedupedRows) {
+    const key = `${row.portName}__${row.portCountry ?? ""}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key)!.push(row);
+  }
+
+  const answerLines: string[] = [];
+  const resultRows: ResultRow[] = [];
+  const matchedLocations: MatchedLocation[] = [];
+
+  const scopeIntro =
+    args.query.scope === "terminal"
+      ? `Terminals with ${bunkerIntentLabel(args.query.intent).toLowerCase()}:`
+      : args.query.scope === "berth"
+        ? `Berths with ${bunkerIntentLabel(args.query.intent).toLowerCase()}:`
+        : `Ports with ${bunkerIntentLabel(args.query.intent).toLowerCase()}:`;
+
+  answerLines.push(scopeIntro);
+
+  for (const [groupKey, portRows] of grouped.entries()) {
+    void groupKey;
+    const first = portRows[0];
+    answerLines.push(`- ${first.portName}${first.portCountry ? `, ${first.portCountry}` : ""}:`);
+
+    for (const row of portRows) {
+      const modeLabel = Array.from(row.modes).map(bunkerModeLabel).join(", ");
+      const displayValue = factRawDisplayValue(row.fact.value, row.fact.unit);
+      const notePart = row.fact.notes ? ` (${row.fact.notes})` : "";
+      answerLines.push(`  - ${row.locationLabel} — ${modeLabel}; raw: ${displayValue}${notePart} (${row.date})`);
+      matchedLocations.push(
+        matchedLocationForScope(
+          row.portName,
+          row.portCountry,
+          row.fact,
+          args.query.scope
+        )
+      );
+      resultRows.push({
+        portName: row.portName,
+        terminalName: row.fact.terminal?.name ?? undefined,
+        berthName: args.query.scope === "berth" ? row.fact.berth?.name ?? undefined : undefined,
+        matchLabel: bunkerIntentLabel(args.query.intent),
+        matchValue: modeLabel,
+        date: row.date,
+      });
+    }
+  }
+
+  return {
+    answer: answerLines.join("\n"),
+    highlightedPorts: Array.from(new Set(dedupedRows.map((row) => row.portName))),
+    matchedLocations: Array.from(
+      new Map(
+        matchedLocations.map((item) => [
+          `${item.portName}__${item.portCountry ?? ""}__${item.terminalName ?? ""}__${item.berthName ?? ""}`,
+          item,
+        ])
+      ).values()
+    ),
+    resultRows: Array.from(
+      new Map(
+        resultRows.map((row) => [
+          `${row.portName}__${row.terminalName ?? ""}__${row.berthName ?? ""}__${row.matchLabel}__${row.matchValue}`,
+          row,
+        ])
+      ).values()
+    ),
+  };
 }
 
 function scopeLabel(
@@ -198,6 +651,229 @@ function observationDisplayValue(args: {
   return `${base} [${normalizedConditionTags.join(", ")}]`;
 }
 
+function factRawDisplayValue(value: string, unit: string | null) {
+  const normalizedValue = value.trim();
+  const normalizedUnit = (unit ?? "").trim();
+  if (!normalizedUnit) return normalizedValue;
+
+  const lowerValue = normalizedValue.toLowerCase();
+  const lowerUnit = normalizedUnit.toLowerCase();
+  if (lowerValue.includes(lowerUnit)) return normalizedValue;
+
+  const unitAliases =
+    lowerUnit === "m"
+      ? [" meter", " meters", " metre", " metres"]
+      : lowerUnit === "ft"
+        ? [" foot", " feet", " ft"]
+        : [];
+  if (unitAliases.some((alias) => lowerValue.includes(alias.trim()))) return normalizedValue;
+
+  return `${normalizedValue} ${normalizedUnit}`.trim();
+}
+
+function detectRateUnit(value: string, unit: string | null, notes: string | null, rawSnippet?: string | null) {
+  const explicitUnit = (unit ?? "").toLowerCase().trim();
+  const combined = `${value} ${unit ?? ""} ${notes ?? ""} ${rawSnippet ?? ""}`.toLowerCase();
+
+  if (
+    /\bmt\/day\b|\bmt per day\b|\btons?\/day\b|\btonnes?\/day\b|\btpd\b|\bper day\b/.test(explicitUnit) ||
+    /\bmt\/day\b|\bmt per day\b|\btons?\/day\b|\btonnes?\/day\b|\btpd\b/.test(combined)
+  ) {
+    return "day";
+  }
+  if (
+    /\bmt\/shift\b|\bmt per shift\b|\btons?\/shift\b|\btonnes?\/shift\b|\bper shift\b/.test(explicitUnit) ||
+    /\bmt\/shift\b|\bmt per shift\b|\btons?\/shift\b|\btonnes?\/shift\b/.test(combined)
+  ) {
+    return "shift";
+  }
+  if (
+    /\bmt\/hour\b|\bmt\/hr\b|\bmt\/h\b|\bmt per hour\b|\btons?\/hour\b|\btonnes?\/hour\b|\bper hour\b/.test(explicitUnit) ||
+    /\bmt\/hour\b|\bmt\/hr\b|\bmt\/h\b|\bmt per hour\b|\btons?\/hour\b|\btonnes?\/hour\b/.test(combined)
+  ) {
+    return "hour";
+  }
+
+  return null;
+}
+
+function detectGangMultiplier(value: string, notes: string | null, rawSnippet?: string | null) {
+  const combined = `${value} ${notes ?? ""} ${rawSnippet ?? ""}`.toLowerCase();
+  const explicitForMatch = combined.match(/\bfor\s+(\d+(?:\.\d+)?)\s+gangs?\b/);
+  if (explicitForMatch) {
+    const parsed = Number(explicitForMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+
+  const looseGangMatch = combined.match(/\b(\d+(?:\.\d+)?)\s+gangs?\b/);
+  if (looseGangMatch && !/\bper gang\b/.test(combined)) {
+    const parsed = Number(looseGangMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+
+  return 1;
+}
+
+function detectShiftsPerDay(value: string, notes: string | null, rawSnippet?: string | null) {
+  const combined = `${value} ${notes ?? ""} ${rawSnippet ?? ""}`.toLowerCase();
+  const shiftMatch = combined.match(/\b(\d+(?:\.\d+)?)\s+shifts?(?:\s+per\s+day)?\b/);
+  if (shiftMatch) {
+    const parsed = Number(shiftMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 2;
+}
+
+function parseRateToDailyEquivalent(args: {
+  value: string;
+  unit: string | null;
+  notes: string | null;
+  rawSnippet?: string | null;
+}) {
+  const combined = `${args.value} ${args.unit ?? ""} ${args.notes ?? ""} ${args.rawSnippet ?? ""}`.toLowerCase();
+  const rangeMatch = combined.match(
+    /(-?\d[\d,]*(?:\.\d+)?)\s*(?:-|–|to)\s*(-?\d[\d,]*(?:\.\d+)?)/i
+  );
+  const singleMatch =
+    combined.match(/\b(?:load(?:ing)? rate|discharg(?:e|ing) rate)?[^0-9]{0,20}(-?\d[\d,]*(?:\.\d+)?)/i) ||
+    combined.match(/(-?\d[\d,]*(?:\.\d+)?)/);
+
+  const values = rangeMatch
+    ? [Number(String(rangeMatch[1]).replace(/,/g, "")), Number(String(rangeMatch[2]).replace(/,/g, ""))]
+    : singleMatch
+      ? [Number(String(singleMatch[1]).replace(/,/g, ""))]
+      : [];
+  if (values.length === 0 || values.some((value) => !Number.isFinite(value))) return null;
+
+  const rateUnit = detectRateUnit(args.value, args.unit, args.notes, args.rawSnippet);
+  if (!rateUnit) return null;
+
+  const gangMultiplier = detectGangMultiplier(args.value, args.notes, args.rawSnippet);
+  const shiftsPerDay = detectShiftsPerDay(args.value, args.notes, args.rawSnippet);
+  const perGang = /\bper gang\b/.test(combined);
+
+  const converted = values.map((numeric) => {
+    let dailyEquivalent = numeric;
+    if (rateUnit === "hour") dailyEquivalent = numeric * 24;
+    else if (rateUnit === "shift") dailyEquivalent = numeric * shiftsPerDay;
+
+    if (perGang || gangMultiplier > 1) {
+      dailyEquivalent *= gangMultiplier;
+    }
+    return dailyEquivalent;
+  });
+
+  const minDailyEquivalent = Math.min(...converted);
+  const maxDailyEquivalent = Math.max(...converted);
+
+  return {
+    dailyEquivalent: values.length === 1 ? converted[0] : (minDailyEquivalent + maxDailyEquivalent) / 2,
+    minDailyEquivalent,
+    maxDailyEquivalent,
+    rateUnit,
+    gangMultiplier,
+    shiftsPerDay,
+    perGang,
+  };
+}
+
+function compareRateEquivalent(
+  rate: { minDailyEquivalent: number; maxDailyEquivalent: number },
+  comparator: "gt" | "gte" | "lt" | "lte",
+  threshold: number
+) {
+  if (comparator === "gt") return rate.maxDailyEquivalent > threshold;
+  if (comparator === "gte") return rate.maxDailyEquivalent >= threshold;
+  if (comparator === "lt") return rate.minDailyEquivalent < threshold;
+  return rate.minDailyEquivalent <= threshold;
+}
+
+function compareRateEquivalentRange(
+  rate: { minDailyEquivalent: number; maxDailyEquivalent: number },
+  minThreshold: number,
+  maxThreshold: number
+) {
+  return rate.maxDailyEquivalent >= minThreshold && rate.minDailyEquivalent <= maxThreshold;
+}
+
+function formatLengthAnswerValue(args: {
+  fact: FactForFilters;
+  numericValue: number;
+}) {
+  const roundedMeters = Number(args.numericValue.toFixed(2));
+  const raw = factRawDisplayValue(args.fact.value, args.fact.unit);
+  const rawLower = raw.toLowerCase();
+  const hasMetricAlready = /\b\d+(?:\.\d+)?\s*m\b|\b\d+(?:\.\d+)?\s*meters?\b|\b\d+(?:\.\d+)?\s*metres?\b/.test(
+    rawLower
+  );
+  if (hasMetricAlready) return raw;
+  return `${roundedMeters} m (${raw})`;
+}
+
+function formatRateAnswerValue(args: {
+  fact: FactForFilters;
+  numericValue: number;
+}) {
+  const roundedDaily = Math.round(args.numericValue);
+  const raw = factRawDisplayValue(args.fact.value, args.fact.unit);
+  return `${roundedDaily.toLocaleString("en-US")} MT/day eq (${raw})`;
+}
+
+function formatFactValueForDeterministicAnswer(args: {
+  fact: FactForFilters;
+  numericValue?: number;
+  family: "length" | "plain" | "rate" | "density";
+}) {
+  if (args.family === "length" && typeof args.numericValue === "number") {
+    return formatLengthAnswerValue({ fact: args.fact, numericValue: args.numericValue });
+  }
+  if (args.family === "rate" && typeof args.numericValue === "number") {
+    return formatRateAnswerValue({ fact: args.fact, numericValue: args.numericValue });
+  }
+  return factRawDisplayValue(args.fact.value, args.fact.unit);
+}
+
+function evidenceBucketValueForFact(fact: {
+  category: string;
+  value: string;
+  unit: string | null;
+  notes: string | null;
+  rawSnippet?: string | null;
+}) {
+  const derivedCategory = deriveFilterCategory({
+    category: fact.category,
+    value: fact.value,
+    unit: fact.unit,
+    notes: fact.notes,
+    rawSnippet: fact.rawSnippet ?? null,
+    scope: PortFactScope.PORT,
+    terminal: null,
+    berth: null,
+    sourceRecord: null,
+    createdAt: new Date(0),
+  });
+
+  if (derivedCategory === "load_rate" || derivedCategory === "discharge_rate") {
+    const normalized = parseRateToDailyEquivalent({
+      value: fact.value,
+      unit: fact.unit,
+      notes: fact.notes,
+      rawSnippet: fact.rawSnippet,
+    });
+    if (normalized) {
+      const roundedDaily = Math.round(normalized.dailyEquivalent);
+      return `${roundedDaily.toLocaleString("en-US")} MT/day eq [from ${factRawDisplayValue(fact.value, fact.unit)}]`;
+    }
+  }
+
+  return observationDisplayValue({
+    category: fact.category,
+    value: fact.value,
+    unit: fact.unit,
+    notes: fact.notes,
+  });
+}
+
 function buildEvidenceFrequencyLines(args: {
   portName: string;
   facts: Array<{
@@ -206,6 +882,7 @@ function buildEvidenceFrequencyLines(args: {
     value: string;
     unit: string | null;
     notes: string | null;
+    rawSnippet?: string | null;
     terminal: { name: string } | null;
     berth: { name: string } | null;
   }>;
@@ -238,11 +915,12 @@ function buildEvidenceFrequencyLines(args: {
       });
     }
 
-    const displayValue = observationDisplayValue({
+    const displayValue = evidenceBucketValueForFact({
       category,
       value: fact.value,
       unit: fact.unit,
       notes: fact.notes,
+      rawSnippet: fact.rawSnippet ?? null,
     });
     const bucket = grouped.get(key)!;
     bucket.counts.set(displayValue, (bucket.counts.get(displayValue) ?? 0) + 1);
@@ -343,6 +1021,11 @@ function parseNumericMeters(args: {
   notes: string | null;
   rawSnippet?: string | null;
 }, family: "length" | "plain" | "rate" | "density" = "length") {
+  if (family === "rate") {
+    const normalizedRate = parseRateToDailyEquivalent(args);
+    if (normalizedRate) return normalizedRate.dailyEquivalent;
+  }
+
   const valueText = `${args.value}`.trim();
   const explicitUnit = (args.unit ?? "").toLowerCase();
   const combined = `${args.value} ${args.unit ?? ""} ${args.notes ?? ""} ${args.rawSnippet ?? ""}`.toLowerCase();
@@ -413,13 +1096,370 @@ function isSummaryOverviewRequest(question: string) {
   );
 }
 
-function parseDeterministicFilters(question: string): DeterministicFilter[] {
+function extractRawUserQuestion(question: string) {
+  const trimmed = question.trim();
+  const patterns = [
+    /^use the whole database for this question\.[\s\S]*?\n\n/i,
+    /^focus only on [\s\S]*?\n\n/i,
+  ];
+
+  for (const pattern of patterns) {
+    if (pattern.test(trimmed)) {
+      return trimmed.replace(pattern, "").trim();
+    }
+  }
+
+  return trimmed;
+}
+
+function canonicalCountry(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function questionMatchesCountry(question: string, country: string) {
+  const canonical = canonicalCountry(country);
+  if (!canonical) return false;
+
+  const aliases = new Set<string>([canonical]);
+  if (canonical === "us" || canonical === "usa" || canonical === "united states") {
+    aliases.add("us");
+    aliases.add("usa");
+    aliases.add("u.s.");
+    aliases.add("united states");
+    aliases.add("united states of america");
+    aliases.add("american");
+  }
+  if (canonical === "canada") {
+    aliases.add("canada");
+    aliases.add("canadian");
+  }
+  if (canonical === "china") {
+    aliases.add("china");
+    aliases.add("chinese");
+  }
+  if (canonical === "australia") {
+    aliases.add("australia");
+    aliases.add("australian");
+  }
+
+  return Array.from(aliases).some((alias) => {
+    const escaped = escapeRegExp(alias);
+    return new RegExp(`(?:^|[^a-z])${escaped}(?:$|[^a-z])`, "i").test(question);
+  });
+}
+
+function detectPortContext(question: string, ports: PortForFilters[]) {
   const lower = question.toLowerCase();
-  if (isSummaryOverviewRequest(question)) return [];
+  const matches = ports
+    .map((port) => port.name)
+    .filter((name) => lower.includes(name.toLowerCase()))
+    .sort((a, b) => b.length - a.length);
+  return matches[0];
+}
+
+function detectTerminalContext(question: string, ports: PortForFilters[]) {
+  const lower = question.toLowerCase();
+  const terminalNames = Array.from(
+    new Set(
+      ports.flatMap((port) =>
+        port.facts.map((fact) => fact.terminal?.name).filter((name): name is string => Boolean(name))
+      )
+    )
+  );
+  const matches = terminalNames
+    .filter((name) => lower.includes(name.toLowerCase()))
+    .sort((a, b) => b.length - a.length);
+  return matches[0];
+}
+
+function shouldTrySemanticPlanner(question: string) {
+  if (isSummaryOverviewRequest(question)) return false;
+  return /\bports?\b|\bterminals?\b|\bberths?\b|порты|терминал|причал|which|what|show me|find/i.test(
+    question
+  );
+}
+
+function buildPlannerContext(ports: PortForFilters[]) {
+  return ports
+    .map((port) => {
+      const terminalNames = Array.from(
+        new Set(
+          port.facts
+            .map((fact) => fact.terminal?.name)
+            .filter((name): name is string => Boolean(name))
+        )
+      )
+        .sort((a, b) => a.localeCompare(b))
+        .slice(0, 12);
+      return `- ${port.name}${port.country ? `, ${port.country}` : ""}${
+        terminalNames.length ? ` | terminals: ${terminalNames.join("; ")}` : ""
+      }`;
+    })
+    .join("\n");
+}
+
+function normalizePlannerUnit(unit: string | undefined, family: "length" | "plain" | "rate" | "density") {
+  if (!unit) return family === "length" ? "m" : "";
+  return unit;
+}
+
+function plannerFilterToDeterministic(
+  filter: SemanticPlannerFilter,
+  ports: PortForFilters[]
+): DeterministicFilter | null {
+  if (filter.type === "numeric") {
+    const config = NUMERIC_PARAMETER_CONFIG.find((item) => item.parameter === filter.category);
+    if (!config) return null;
+    if (filter.operator === "between") {
+      if (typeof filter.min !== "number" || typeof filter.max !== "number") return null;
+      const min = filter.min;
+      const max = filter.max;
+      return {
+        kind: "numeric_range",
+        parameter: filter.category,
+        minThreshold: Math.min(min, max),
+        maxThreshold: Math.max(min, max),
+        displayRange: `${Math.min(min, max)} ${normalizePlannerUnit(filter.unit, config.family)} to ${Math.max(min, max)} ${normalizePlannerUnit(filter.unit, config.family)}`.trim(),
+      };
+    }
+    if (typeof filter.value !== "number") return null;
+    return {
+      kind: "numeric",
+      parameter: filter.category,
+      comparator: filter.operator,
+      threshold: filter.value,
+      displayThreshold: `${filter.value}${filter.unit ? ` ${filter.unit}` : config.family === "length" ? " m" : ""}`.trim(),
+    };
+  }
+
+  if (filter.type === "capability") {
+    const match = CAPABILITY_FILTERS.find(
+      (item) => item.capability.toLowerCase() === filter.capability.toLowerCase()
+    );
+    if (!match) return null;
+    return {
+      kind: "capability",
+      capability: match.capability,
+      displayLabel: match.displayLabel,
+    };
+  }
+
+  if (filter.type === "condition") {
+    const match = CONDITION_FILTERS.find(
+      (item) => item.token.toLowerCase() === filter.condition.toLowerCase()
+    );
+    if (!match) return null;
+    return {
+      kind: "condition",
+      token: match.token,
+      displayLabel: match.displayLabel,
+    };
+  }
+
+  if (filter.type === "country") {
+    const matchedCountry = ports
+      .map((port) => port.country)
+      .filter((country): country is string => Boolean(country))
+      .find((country) => canonicalCountry(country) === canonicalCountry(filter.country));
+    if (!matchedCountry) return null;
+    return {
+      kind: "country",
+      country: matchedCountry,
+      displayLabel: matchedCountry,
+    };
+  }
+
+  return null;
+}
+
+async function planSemanticFilterQuery(
+  question: string,
+  ports: PortForFilters[]
+): Promise<DeterministicQuery | null> {
+  if (!shouldTrySemanticPlanner(question)) return null;
+
+  const plannerPrompt = `
+You convert a user's natural-language search question into a strict filter plan for a port intelligence database.
+
+Rules:
+- Only return intent="filter" when the user is clearly asking to find ports, terminals, or berths matching criteria.
+- Prefer semantic understanding over literal keyword matching.
+- Use only supported categories:
+  draft, loa, beam, air_draft, dwt, density, load_rate, discharge_rate, gangs, shifts, ukc, freeboard, trim, tide
+- Use only supported capabilities:
+  grain, cement, coal, petcoke, sulphur
+- Use only supported conditions:
+  FW, SW, Brackish, NAABSA, Zero tide, HW, LW
+- If the user names a known port or terminal, put it in locationContext.
+- If the user asks about terminals in a port, scope=terminal.
+- If the user asks about berths in a port or terminal, scope=berth.
+- Use combineMode="or" only when the user explicitly asks an OR-style query. Otherwise use "and".
+- If you are not confident that this is a filter/search query, return intent="other" with filters=[].
+`.trim();
+
+  const plannerContext = buildPlannerContext(ports);
+  const response = await client.chat.completions.create({
+    model: "gpt-4.1-mini",
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "semantic_filter_plan",
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            intent: { type: "string", enum: ["filter", "other"] },
+            scope: { type: "string", enum: ["port", "terminal", "berth"] },
+            combineMode: { type: "string", enum: ["and", "or"] },
+            locationContext: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                port: { type: "string" },
+                terminal: { type: "string" },
+              },
+              required: [],
+            },
+            filters: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  type: { type: "string", enum: ["numeric", "capability", "condition", "country"] },
+                  category: { type: "string" },
+                  operator: { type: "string", enum: ["gt", "gte", "lt", "lte", "between"] },
+                  value: { type: "number" },
+                  min: { type: "number" },
+                  max: { type: "number" },
+                  unit: { type: "string" },
+                  capability: { type: "string" },
+                  mode: { type: "string", enum: ["include", "exclude"] },
+                  condition: { type: "string" },
+                  country: { type: "string" },
+                },
+                required: ["type"],
+              },
+            },
+          },
+          required: ["intent", "scope", "combineMode", "filters"],
+        },
+      },
+    },
+    messages: [
+      { role: "system", content: plannerPrompt },
+      { role: "system", content: `Known ports and terminals:\n${plannerContext}` },
+      { role: "user", content: question },
+    ],
+  });
+
+  const rawContent = response.choices[0]?.message?.content;
+  if (!rawContent) return null;
+
+  const parsed = JSON.parse(rawContent) as SemanticPlannerResult;
+  if (parsed.intent !== "filter" || !Array.isArray(parsed.filters) || parsed.filters.length === 0) {
+    return null;
+  }
+
   const filters: DeterministicFilter[] = [];
+  const negateCapabilities: string[] = [];
+  const negateConditions: string[] = [];
+
+  for (const filter of parsed.filters) {
+    if (filter.type === "capability" && filter.mode === "exclude") {
+      negateCapabilities.push(filter.capability);
+      continue;
+    }
+    if (filter.type === "condition" && filter.mode === "exclude") {
+      negateConditions.push(filter.condition);
+      continue;
+    }
+    const mapped = plannerFilterToDeterministic(filter, ports);
+    if (mapped) filters.push(mapped);
+  }
+
+  const matchedPortContext = parsed.locationContext?.port
+    ? detectPortContext(parsed.locationContext.port, ports)
+    : undefined;
+  const matchedTerminalContext = parsed.locationContext?.terminal
+    ? detectTerminalContext(parsed.locationContext.terminal, ports)
+    : undefined;
+
+  return {
+    filters,
+    mode: parsed.combineMode === "or" ? "or" : "and",
+    scope: parsed.scope,
+    portContextName: matchedPortContext,
+    terminalContextName: matchedTerminalContext,
+    negateCapabilities,
+    negateConditions,
+  };
+}
+
+function parseDeterministicQuery(question: string, ports: PortForFilters[]): DeterministicQuery {
+  const lower = question.toLowerCase();
+  if (isSummaryOverviewRequest(question)) {
+    return {
+      filters: [],
+      mode: "and",
+      scope: "port",
+      negateCapabilities: [],
+      negateConditions: [],
+    };
+  }
+  const filters: DeterministicFilter[] = [];
+  const negateCapabilities: string[] = [];
+  const negateConditions: string[] = [];
+  const mode: "and" | "or" = /\bor\b| либо | или /i.test(question) ? "or" : "and";
+  const scope: "port" | "terminal" | "berth" =
+    /\bberths?\b|причал/i.test(question)
+      ? "berth"
+      : /\bterminals?\b|терминал/i.test(question)
+        ? "terminal"
+        : "port";
+  const portContextName = detectPortContext(question, ports);
+  const terminalContextName = detectTerminalContext(question, ports);
 
   for (const config of NUMERIC_PARAMETER_CONFIG) {
     for (const alias of config.aliases) {
+      const betweenPatterns = [
+        new RegExp(`\\b${alias.replace(/\s+/g, "\\s+")}\\b[\\s\\S]{0,40}?(between)\\s+(\\d[\\d,]*(?:\\.\\d+)?)\\s*(m|meter|meters|metres|ft|feet|foot)?\\s+(?:and|to)\\s+(\\d[\\d,]*(?:\\.\\d+)?)\\s*(m|meter|meters|metres|ft|feet|foot)?`, "i"),
+        new RegExp(`between\\s+(\\d[\\d,]*(?:\\.\\d+)?)\\s*(m|meter|meters|metres|ft|feet|foot)?\\s+(?:and|to)\\s+(\\d[\\d,]*(?:\\.\\d+)?)\\s*(m|meter|meters|metres|ft|feet|foot)?[\\s\\S]{0,20}?\\b${alias.replace(/\s+/g, "\\s+")}\\b`, "i"),
+      ];
+
+      for (const pattern of betweenPatterns) {
+        const match = lower.match(pattern);
+        if (!match) continue;
+        const firstValue = Number(String(match[pattern === betweenPatterns[0] ? 2 : 1]).replace(/,/g, ""));
+        const firstUnit = match[pattern === betweenPatterns[0] ? 3 : 2] ?? (config.family === "length" ? "m" : "");
+        const secondValue = Number(String(match[pattern === betweenPatterns[0] ? 4 : 3]).replace(/,/g, ""));
+        const secondUnit = match[pattern === betweenPatterns[0] ? 5 : 4] ?? firstUnit;
+        if (!Number.isFinite(firstValue) || !Number.isFinite(secondValue)) continue;
+        const lowerBound =
+          config.family === "length" && /\bft\b|\bfeet\b|\bfoot\b/i.test(firstUnit)
+            ? firstValue * 0.3048
+            : firstValue;
+        const upperBound =
+          config.family === "length" && /\bft\b|\bfeet\b|\bfoot\b/i.test(secondUnit)
+            ? secondValue * 0.3048
+            : secondValue;
+        const low = Math.min(lowerBound, upperBound);
+        const high = Math.max(lowerBound, upperBound);
+        filters.push({
+          kind: "numeric_range",
+          parameter: config.parameter,
+          minThreshold: low,
+          maxThreshold: high,
+          displayRange:
+            `${Math.min(firstValue, secondValue)}${firstUnit ? ` ${firstUnit}` : ""} to ${Math.max(firstValue, secondValue)}${secondUnit ? ` ${secondUnit}` : ""}`.trim(),
+        });
+        break;
+      }
+
       const patterns = [
         new RegExp(`\\b${alias.replace(/\s+/g, "\\s+")}\\b[\\s\\S]{0,40}?(above|over|greater than|more than|deeper than|>=|>|at least|under|below|less than|shallower than|<=|<|at most)\\s+(\\d[\\d,]*(?:\\.\\d+)?)\\s*(m|meter|meters|metres|ft|feet|foot)?`, "i"),
         new RegExp(`(above|over|greater than|more than|deeper than|>=|>|at least|under|below|less than|shallower than|<=|<|at most)\\s+(\\d[\\d,]*(?:\\.\\d+)?)\\s*(m|meter|meters|metres|ft|feet|foot)?[\\s\\S]{0,20}?\\b${alias.replace(/\s+/g, "\\s+")}\\b`, "i"),
@@ -449,6 +1489,10 @@ function parseDeterministicFilters(question: string): DeterministicFilter[] {
   }
 
   for (const config of CAPABILITY_FILTERS) {
+    if (config.aliases.some((alias) => new RegExp(`\\bnot\\s+${alias}\\b|without\\s+${alias}\\b|не\\s+${alias}`).test(lower))) {
+      negateCapabilities.push(config.capability);
+      continue;
+    }
     if (config.aliases.some((alias) => lower.includes(alias))) {
       filters.push({
         kind: "capability",
@@ -459,6 +1503,10 @@ function parseDeterministicFilters(question: string): DeterministicFilter[] {
   }
 
   for (const config of CONDITION_FILTERS) {
+    if (config.aliases.some((alias) => new RegExp(`\\bnot\\s+${alias}\\b|without\\s+${alias}\\b|не\\s+${alias}`).test(lower))) {
+      negateConditions.push(config.token);
+      continue;
+    }
     if (config.aliases.some((alias) => lower.includes(alias))) {
       filters.push({
         kind: "condition",
@@ -468,18 +1516,49 @@ function parseDeterministicFilters(question: string): DeterministicFilter[] {
     }
   }
 
+  const countriesInQuestion = Array.from(
+    new Set(
+      ports
+        .map((port) => port.country)
+        .filter((country): country is string => Boolean(country))
+        .filter((country) => questionMatchesCountry(question, country))
+    )
+  );
+
+  for (const country of countriesInQuestion) {
+    filters.push({
+      kind: "country",
+      country,
+      displayLabel: country,
+    });
+  }
+
   const seen = new Set<string>();
-  return filters.filter((filter) => {
+  const deduped = filters.filter((filter) => {
     const key =
       filter.kind === "numeric"
         ? `${filter.kind}:${filter.parameter}:${filter.comparator}:${filter.threshold}`
+        : filter.kind === "numeric_range"
+          ? `${filter.kind}:${filter.parameter}:${filter.minThreshold}:${filter.maxThreshold}`
         : filter.kind === "capability"
           ? `${filter.kind}:${filter.capability}`
-          : `${filter.kind}:${filter.token}`;
+          : filter.kind === "condition"
+            ? `${filter.kind}:${filter.token}`
+            : `${filter.kind}:${filter.country}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+
+  return {
+    filters: deduped,
+    mode,
+    scope,
+    portContextName,
+    terminalContextName,
+    negateCapabilities,
+    negateConditions,
+  };
 }
 
 function formatComparator(filter: NumericFilter) {
@@ -489,13 +1568,101 @@ function formatComparator(filter: NumericFilter) {
   return `at most ${filter.displayThreshold}`;
 }
 
+function formatRange(filter: NumericRangeFilter) {
+  return `between ${filter.displayRange}`;
+}
+
+function describeDeterministicFilter(filter: DeterministicFilter) {
+  if (filter.kind === "numeric") {
+    return `${NUMERIC_PARAMETER_CONFIG.find((item) => item.parameter === filter.parameter)?.label ?? filter.parameter} ${formatComparator(filter)}`;
+  }
+  if (filter.kind === "numeric_range") {
+    return `${NUMERIC_PARAMETER_CONFIG.find((item) => item.parameter === filter.parameter)?.label ?? filter.parameter} ${formatRange(filter)}`;
+  }
+  if (filter.kind === "capability") return filter.displayLabel;
+  if (filter.kind === "country") return `Country ${filter.displayLabel}`;
+  return `Condition ${filter.displayLabel}`;
+}
+
+function locationLabelForScope(
+  portName: string,
+  fact: FactForFilters,
+  scope: "port" | "terminal" | "berth"
+) {
+  if (scope === "berth") {
+    return [fact.terminal?.name, fact.berth?.name].filter(Boolean).join(" > ");
+  }
+  if (scope === "terminal") {
+    return fact.terminal?.name ?? "";
+  }
+  return fact.scope === PortFactScope.BERTH
+    ? [fact.terminal?.name, fact.berth?.name].filter(Boolean).join(" > ")
+    : fact.scope === PortFactScope.TERMINAL
+      ? fact.terminal?.name ?? portName
+      : portName;
+}
+
+function isBerthLikeLocationName(value: string | null | undefined) {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    /\bberth\b|\bpier\b|\bjetty\b|\bdock\b|\bwharf\b|\bquay\b/.test(normalized) ||
+    /\b(lb|b|pbg)\s*-?\d+\b/.test(normalized) ||
+    /\b\d+#\b/.test(normalized) ||
+    /^\d+[a-z]?$/i.test(normalized)
+  );
+}
+
+function factMatchesRequestedScope(
+  fact: FactForFilters,
+  scope: "port" | "terminal" | "berth"
+) {
+  if (scope === "port") return true;
+  if (scope === "terminal") return Boolean(fact.terminal?.name);
+  return Boolean(fact.berth?.name) || isBerthLikeLocationName(fact.terminal?.name);
+}
+
+function matchedLocationForScope(
+  portName: string,
+  portCountry: string | null | undefined,
+  fact: FactForFilters,
+  scope: "port" | "terminal" | "berth"
+): MatchedLocation {
+  if (scope === "berth") {
+    return {
+      portName,
+      portCountry: portCountry ?? undefined,
+      terminalName: fact.terminal?.name ?? undefined,
+      berthName: fact.berth?.name ?? undefined,
+    };
+  }
+  if (scope === "terminal") {
+    return {
+      portName,
+      portCountry: portCountry ?? undefined,
+      terminalName: fact.terminal?.name ?? undefined,
+    };
+  }
+  return {
+    portName,
+    portCountry: portCountry ?? undefined,
+    terminalName: fact.terminal?.name ?? undefined,
+    berthName: fact.berth?.name ?? undefined,
+  };
+}
+
 function buildDeterministicFilterAnswer(args: {
   ports: PortForFilters[];
-  filters: DeterministicFilter[];
+  query: DeterministicQuery;
 }) {
   const matchedLocations: MatchedLocation[] = [];
   const resultRows: ResultRow[] = [];
   const matches = args.ports
+    .filter((port) =>
+      args.query.portContextName
+        ? port.name.toLowerCase() === args.query.portContextName.toLowerCase()
+        : true
+    )
     .map((port) => {
       const inferredCapabilities = inferCapabilities({
         portName: port.name,
@@ -503,13 +1670,53 @@ function buildDeterministicFilterAnswer(args: {
       });
 
       const filterSections: string[] = [];
+      const matchedPositiveFilters = new Set<string>();
 
-      for (const filter of args.filters) {
-        if (filter.kind === "numeric") {
+      if (
+        args.query.negateCapabilities.some((token) =>
+          inferredCapabilities.some((capability) => capability.capability.toLowerCase().includes(token))
+        )
+      ) {
+        return null;
+      }
+
+      if (
+        args.query.negateConditions.some((token) =>
+          port.facts.some((fact) =>
+            conditionTagsFromParsed(
+              parseOperationalConditions(
+                fact.value,
+                fact.unit,
+                [fact.notes, fact.rawSnippet].filter(Boolean).join(" ")
+              )
+            ).includes(token)
+          )
+        )
+      ) {
+        return null;
+      }
+
+      for (const filter of args.query.filters) {
+        if (filter.kind === "numeric" || filter.kind === "numeric_range") {
           const config = NUMERIC_PARAMETER_CONFIG.find((item) => item.parameter === filter.parameter)!;
           const qualifyingFacts = port.facts
+            .filter((fact) =>
+              args.query.terminalContextName
+                ? (fact.terminal?.name ?? "").toLowerCase() === args.query.terminalContextName.toLowerCase()
+                : true
+            )
+            .filter((fact) => factMatchesRequestedScope(fact, args.query.scope))
             .filter((fact) => deriveFilterCategory(fact) === filter.parameter)
             .map((fact) => {
+              const normalizedRate =
+                config.family === "rate"
+                  ? parseRateToDailyEquivalent({
+                      value: fact.value,
+                      unit: fact.unit,
+                      notes: fact.notes,
+                      rawSnippet: fact.rawSnippet ?? null,
+                    })
+                  : null;
               const numericValue = parseNumericMeters(
                 {
                   value: fact.value,
@@ -524,18 +1731,40 @@ function buildDeterministicFilterAnswer(args: {
                 : {
                     fact,
                     numericValue,
+                    normalizedRate,
                   };
             })
-            .filter((item): item is { fact: FactForFilters; numericValue: number } =>
-              Boolean(item && compareNumeric(item.numericValue, filter.comparator, filter.threshold))
-            )
+            .filter((item): item is { fact: FactForFilters; numericValue: number; normalizedRate: ReturnType<typeof parseRateToDailyEquivalent> | null } => {
+              if (!item) return false;
+              if (config.family === "rate" && item.normalizedRate) {
+                if (filter.kind === "numeric_range") {
+                  return compareRateEquivalentRange(
+                    item.normalizedRate,
+                    filter.minThreshold,
+                    filter.maxThreshold
+                  );
+                }
+                return compareRateEquivalent(
+                  item.normalizedRate,
+                  filter.comparator,
+                  filter.threshold
+                );
+              }
+              if (filter.kind === "numeric_range") {
+                return item.numericValue >= filter.minThreshold && item.numericValue <= filter.maxThreshold;
+              }
+              return compareNumeric(item.numericValue, filter.comparator, filter.threshold);
+            })
             .sort((a, b) => {
               const aTime = a.fact.sourceRecord?.sourceDate?.getTime() ?? a.fact.createdAt.getTime();
               const bTime = b.fact.sourceRecord?.sourceDate?.getTime() ?? b.fact.createdAt.getTime();
               return b.numericValue - a.numericValue || bTime - aTime;
             });
 
-          if (qualifyingFacts.length === 0) return null;
+          if (qualifyingFacts.length === 0) {
+            if (args.query.mode === "and") return null;
+            continue;
+          }
 
           const byLocation = new Map<
             string,
@@ -547,16 +1776,17 @@ function buildDeterministicFilterAnswer(args: {
           >();
 
           for (const item of qualifyingFacts) {
-            const location =
-              item.fact.scope === PortFactScope.BERTH
-                ? [item.fact.terminal?.name, item.fact.berth?.name].filter(Boolean).join(" > ")
-                : item.fact.scope === PortFactScope.TERMINAL
-                  ? item.fact.terminal?.name ?? port.name
-                  : port.name;
+            const location = locationLabelForScope(port.name, item.fact, args.query.scope);
+            if (!location) continue;
             const locationKey = location.toLowerCase();
             const date = fmtDate(item.fact.sourceRecord?.sourceDate ?? item.fact.createdAt);
             const conditionText = item.fact.notes ? ` (${item.fact.notes})` : "";
-            const line = `    - ${location} — ${item.fact.value}${item.fact.unit ? ` ${item.fact.unit}` : ""}${conditionText} (${date})`;
+            const formattedValue = formatFactValueForDeterministicAnswer({
+              fact: item.fact,
+              numericValue: item.numericValue,
+              family: config.family,
+            });
+            const line = `    - ${location} — ${formattedValue}${conditionText} (${date})`;
 
             const existing = byLocation.get(locationKey);
             if (!existing || item.numericValue > existing.bestValue) {
@@ -571,56 +1801,92 @@ function buildDeterministicFilterAnswer(args: {
           const lines = Array.from(byLocation.values())
             .sort((a, b) => b.bestValue - a.bestValue || a.locationLabel.localeCompare(b.locationLabel))
             .map((item) => item.line);
+          const filterDescription =
+            filter.kind === "numeric_range" ? formatRange(filter) : formatComparator(filter);
 
           for (const item of qualifyingFacts) {
-            matchedLocations.push({
-              portName: port.name,
-              terminalName: item.fact.terminal?.name ?? undefined,
-              berthName: item.fact.berth?.name ?? undefined,
-            });
+            matchedLocations.push(matchedLocationForScope(port.name, port.country, item.fact, args.query.scope));
             resultRows.push({
               portName: port.name,
-              terminalName: item.fact.terminal?.name ?? undefined,
-              berthName: item.fact.berth?.name ?? undefined,
-              matchLabel: `${config.label} ${formatComparator(filter)}`,
-              matchValue: `${item.fact.value}${item.fact.unit ? ` ${item.fact.unit}` : ""}${item.fact.notes ? ` (${item.fact.notes})` : ""}`,
+              terminalName:
+                args.query.scope === "port" ? item.fact.terminal?.name ?? undefined : item.fact.terminal?.name ?? undefined,
+              berthName: args.query.scope === "berth" ? item.fact.berth?.name ?? undefined : undefined,
+              matchLabel: `${config.label} ${filterDescription}`,
+              matchValue: `${formatFactValueForDeterministicAnswer({
+                fact: item.fact,
+                numericValue: item.numericValue,
+                family: config.family,
+              })}${item.fact.notes ? ` (${item.fact.notes})` : ""}`,
               date: fmtDate(item.fact.sourceRecord?.sourceDate ?? item.fact.createdAt),
             });
           }
 
-          filterSections.push(`  - ${config.label} ${formatComparator(filter)}:\n${lines.join("\n")}`);
+          filterSections.push(`  - ${config.label} ${filterDescription}:\n${lines.join("\n")}`);
+          matchedPositiveFilters.add(
+            filter.kind === "numeric_range"
+              ? `${filter.kind}:${filter.parameter}:${filter.minThreshold}:${filter.maxThreshold}`
+              : `${filter.kind}:${filter.parameter}:${filter.comparator}:${filter.threshold}`
+          );
           continue;
         }
 
         if (filter.kind === "capability") {
           const matchingCapabilities = inferredCapabilities
+            .filter((capability) =>
+              args.query.terminalContextName
+                ? (capability.locationLabel.split(" > ")[1] ?? "").toLowerCase() ===
+                  args.query.terminalContextName.toLowerCase()
+                : true
+            )
             .filter((capability) => capability.capability.toLowerCase().includes(filter.capability))
             .map((capability) => `    - ${capability.locationLabel} (${capability.reason})`);
 
-          if (matchingCapabilities.length === 0) return null;
+          if (matchingCapabilities.length === 0) {
+            if (args.query.mode === "and") return null;
+            continue;
+          }
           for (const capability of inferredCapabilities.filter((item) =>
             item.capability.toLowerCase().includes(filter.capability)
           )) {
             const parts = capability.locationLabel.split(" > ");
             matchedLocations.push({
-              portName: parts[0] ?? port.name,
-              terminalName: parts[1] || undefined,
-              berthName: parts[2] || undefined,
+              portName: port.name,
+              portCountry: port.country ?? undefined,
+              terminalName: args.query.scope === "port" ? parts[1] || undefined : parts[1] || undefined,
+              berthName: args.query.scope === "berth" ? parts[2] || undefined : undefined,
             });
             resultRows.push({
-              portName: parts[0] ?? port.name,
+              portName: port.name,
               terminalName: parts[1] || undefined,
-              berthName: parts[2] || undefined,
+              berthName: args.query.scope === "berth" ? parts[2] || undefined : undefined,
               matchLabel: filter.displayLabel,
               matchValue: capability.reason,
               date: "Inferred",
             });
           }
           filterSections.push(`  - ${filter.displayLabel}:\n${matchingCapabilities.join("\n")}`);
+          matchedPositiveFilters.add(`${filter.kind}:${filter.capability}`);
+          continue;
+        }
+
+        if (filter.kind === "country") {
+          const matchesCountry = canonicalCountry(port.country) === canonicalCountry(filter.country);
+          if (!matchesCountry) {
+            if (args.query.mode === "and") return null;
+            continue;
+          }
+          filterSections.push(`  - Country: ${filter.displayLabel}`);
+          matchedPositiveFilters.add(`${filter.kind}:${filter.country}`);
           continue;
         }
 
         const matchingConditionFacts = port.facts
+          .filter((fact) =>
+            args.query.terminalContextName
+              ? (fact.terminal?.name ?? "").toLowerCase() === args.query.terminalContextName.toLowerCase()
+              : true
+          )
+          .filter((fact) => factMatchesRequestedScope(fact, args.query.scope))
           .map((fact) => {
             const tags = conditionTagsFromParsed(
               parseOperationalConditions(
@@ -636,29 +1902,23 @@ function buildDeterministicFilterAnswer(args: {
           })
           .filter((item) => item.tags.includes(filter.token));
 
-        if (matchingConditionFacts.length === 0) return null;
+        if (matchingConditionFacts.length === 0) {
+          if (args.query.mode === "and") return null;
+          continue;
+        }
 
         const lines = matchingConditionFacts.slice(0, 6).map((item) => {
-          const location =
-            item.fact.scope === PortFactScope.BERTH
-              ? [item.fact.terminal?.name, item.fact.berth?.name].filter(Boolean).join(" > ")
-              : item.fact.scope === PortFactScope.TERMINAL
-                ? item.fact.terminal?.name ?? port.name
-                : port.name;
+          const location = locationLabelForScope(port.name, item.fact, args.query.scope);
           const date = fmtDate(item.fact.sourceRecord?.sourceDate ?? item.fact.createdAt);
-          return `    - ${location} | ${item.fact.category}: ${item.fact.value}${item.fact.unit ? ` ${item.fact.unit}` : ""} (${date})`;
+          return `    - ${location || port.name} | ${item.fact.category}: ${item.fact.value}${item.fact.unit ? ` ${item.fact.unit}` : ""} (${date})`;
         });
 
         for (const item of matchingConditionFacts) {
-          matchedLocations.push({
-            portName: port.name,
-            terminalName: item.fact.terminal?.name ?? undefined,
-            berthName: item.fact.berth?.name ?? undefined,
-          });
+          matchedLocations.push(matchedLocationForScope(port.name, port.country, item.fact, args.query.scope));
           resultRows.push({
             portName: port.name,
             terminalName: item.fact.terminal?.name ?? undefined,
-            berthName: item.fact.berth?.name ?? undefined,
+            berthName: args.query.scope === "berth" ? item.fact.berth?.name ?? undefined : undefined,
             matchLabel: `Condition ${filter.displayLabel}`,
             matchValue: `${item.fact.category}: ${item.fact.value}${item.fact.unit ? ` ${item.fact.unit}` : ""}`,
             date: fmtDate(item.fact.sourceRecord?.sourceDate ?? item.fact.createdAt),
@@ -666,13 +1926,18 @@ function buildDeterministicFilterAnswer(args: {
         }
 
         filterSections.push(`  - Condition ${filter.displayLabel}:\n${lines.join("\n")}`);
+        matchedPositiveFilters.add(`${filter.kind}:${filter.token}`);
       }
 
-      if (filterSections.length !== args.filters.length) return null;
+      const requiredPositiveCount = args.query.filters.length;
+      if (requiredPositiveCount > 0) {
+        if (args.query.mode === "and" && matchedPositiveFilters.size !== requiredPositiveCount) return null;
+        if (args.query.mode === "or" && matchedPositiveFilters.size === 0) return null;
+      }
 
       return {
         portName: port.name,
-        rankValue: filterSections.length,
+        rankValue: matchedPositiveFilters.size,
         lines: [`- ${port.name}${port.country ? `, ${port.country}` : ""}:`, ...filterSections],
       };
     })
@@ -680,15 +1945,9 @@ function buildDeterministicFilterAnswer(args: {
     .sort((a, b) => b.rankValue - a.rankValue || a.portName.localeCompare(b.portName));
 
   if (matches.length === 0) {
-    const label = args.filters
-      .map((filter) =>
-        filter.kind === "numeric"
-          ? `${NUMERIC_PARAMETER_CONFIG.find((item) => item.parameter === filter.parameter)?.label ?? filter.parameter} ${formatComparator(filter)}`
-          : filter.kind === "capability"
-            ? filter.displayLabel
-            : `Condition ${filter.displayLabel}`
-      )
-      .join(" + ");
+    const label = args.query.filters
+      .map((filter) => describeDeterministicFilter(filter))
+      .join(args.query.mode === "or" ? " or " : " + ");
     return {
       answer: `No ports in the current Port Intelligence DB match: ${label}.`,
       highlightedPorts: [] as string[],
@@ -698,14 +1957,55 @@ function buildDeterministicFilterAnswer(args: {
   }
 
   let intro = "Ports matching all requested filters:";
-  if (args.filters.length === 1) {
-    const firstFilter = args.filters[0];
-    if (firstFilter.kind === "numeric") {
-      intro = `Ports with ${NUMERIC_PARAMETER_CONFIG.find((item) => item.parameter === firstFilter.parameter)?.label ?? firstFilter.parameter} ${formatComparator(firstFilter)}:`;
+  if (args.query.scope === "terminal") {
+    intro = args.query.portContextName
+      ? `Matching terminals in ${args.query.portContextName}:`
+      : "Matching terminals:";
+  } else if (args.query.scope === "berth") {
+    intro = args.query.terminalContextName
+      ? `Matching berths in ${args.query.terminalContextName}:`
+      : args.query.portContextName
+        ? `Matching berths in ${args.query.portContextName}:`
+        : "Matching berths:";
+  } else if (args.query.mode === "or") {
+    intro = "Ports matching any requested filter:";
+  }
+
+  if (args.query.filters.length === 1) {
+    const firstFilter = args.query.filters[0];
+    if (firstFilter.kind === "numeric" || firstFilter.kind === "numeric_range") {
+      const numericLabel = NUMERIC_PARAMETER_CONFIG.find((item) => item.parameter === firstFilter.parameter)?.label ?? firstFilter.parameter;
+      const numericConstraint =
+        firstFilter.kind === "numeric_range" ? formatRange(firstFilter) : formatComparator(firstFilter);
+      if (args.query.scope === "terminal") {
+        intro = args.query.portContextName
+          ? `Terminals in ${args.query.portContextName} with ${numericLabel} ${numericConstraint}:`
+          : `Terminals with ${numericLabel} ${numericConstraint}:`;
+      } else if (args.query.scope === "berth") {
+        intro = args.query.terminalContextName
+          ? `Berths in ${args.query.terminalContextName} with ${numericLabel} ${numericConstraint}:`
+          : args.query.portContextName
+            ? `Berths in ${args.query.portContextName} with ${numericLabel} ${numericConstraint}:`
+            : `Berths with ${numericLabel} ${numericConstraint}:`;
+      } else {
+        intro = `Ports with ${numericLabel} ${numericConstraint}:`;
+      }
     } else if (firstFilter.kind === "capability") {
-      intro = `Ports matching ${firstFilter.displayLabel}:`;
+      intro =
+        args.query.scope === "terminal"
+          ? `Matching terminals for ${firstFilter.displayLabel}:`
+          : args.query.scope === "berth"
+            ? `Matching berths for ${firstFilter.displayLabel}:`
+            : `Ports matching ${firstFilter.displayLabel}:`;
+    } else if (firstFilter.kind === "country") {
+      intro = `Ports in ${firstFilter.displayLabel}:`;
     } else {
-      intro = `Ports matching condition ${firstFilter.displayLabel}:`;
+      intro =
+        args.query.scope === "terminal"
+          ? `Matching terminals with condition ${firstFilter.displayLabel}:`
+          : args.query.scope === "berth"
+            ? `Matching berths with condition ${firstFilter.displayLabel}:`
+            : `Ports matching condition ${firstFilter.displayLabel}:`;
     }
   }
 
@@ -718,7 +2018,7 @@ function buildDeterministicFilterAnswer(args: {
     matchedLocations: Array.from(
       new Map(
         matchedLocations.map((item) => [
-          `${item.portName}__${item.terminalName ?? ""}__${item.berthName ?? ""}`,
+          `${item.portName}__${item.portCountry ?? ""}__${item.terminalName ?? ""}__${item.berthName ?? ""}`,
           item,
         ])
       ).values()
@@ -755,8 +2055,8 @@ export async function POST(req: NextRequest) {
       body.messages;
     const latestUserMessage =
       [...incomingMessages].reverse().find((message) => message.role === "user")?.content ?? "";
-    const isSummaryRequest = isSummaryOverviewRequest(latestUserMessage);
-    const deterministicFilters = parseDeterministicFilters(latestUserMessage);
+    const routingQuestion = extractRawUserQuestion(latestUserMessage);
+    const isSummaryRequest = isSummaryOverviewRequest(routingQuestion);
 
     const ports = await prisma.port.findMany({
       include: {
@@ -773,6 +2073,14 @@ export async function POST(req: NextRequest) {
       take: 100,
     });
 
+    const semanticPlannedQuery = await planSemanticFilterQuery(routingQuestion, ports).catch((error) => {
+      console.warn("Semantic planner fallback:", error);
+      return null;
+    });
+    const deterministicQuery =
+      semanticPlannedQuery ?? parseDeterministicQuery(routingQuestion, ports);
+    const bunkerQuery = parseBunkerQuestion(routingQuestion, ports);
+
     if (!ports.length) {
       return NextResponse.json(
         {
@@ -783,10 +2091,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!isSummaryRequest && deterministicFilters.length > 0 && /\bports?\b|порты/i.test(latestUserMessage)) {
+    if (!isSummaryRequest && bunkerQuery) {
+      const bunkerAnswer = buildBunkerAnswer({
+        ports,
+        query: bunkerQuery,
+      });
+      return NextResponse.json(bunkerAnswer, { status: 200 });
+    }
+
+    if (
+      !isSummaryRequest &&
+      deterministicQuery.filters.length > 0 &&
+      /\bports?\b|\bterminals?\b|\bberths?\b|порты|терминал|причал/i.test(routingQuestion)
+    ) {
       const deterministic = buildDeterministicFilterAnswer({
         ports,
-        filters: deterministicFilters,
+        query: deterministicQuery,
       });
       return NextResponse.json(deterministic, { status: 200 });
     }
@@ -858,10 +2178,12 @@ export async function POST(req: NextRequest) {
         (capability) =>
           `  [INFERRED CAPABILITY ${capability.scope}] ${capability.locationLabel} | ${capability.capability} | confidence=${capability.confidence} | reason=${capability.reason} | signals=${capability.signals.join(", ")}`
       );
+      const bunkerModeLines = buildBunkerModeContextLines(port);
 
       contextBlocks.push([
         portHeader,
         ...capabilityLines,
+        ...bunkerModeLines,
         ...evidenceFrequencyLines,
         ...resolvedLines,
         ...factLines,
@@ -869,7 +2191,7 @@ export async function POST(req: NextRequest) {
     }
 
     const dbContext = contextBlocks.join("\n\n");
-    const systemWithContext = `${systemPrompt}\n\n=== PORT INTELLIGENCE DB ===\n\n${dbContext}`;
+    const systemWithContext = `${systemPrompt}${bunkerQuestionInstruction(routingQuestion)}\n\n=== PORT INTELLIGENCE DB ===\n\n${dbContext}`;
     const thresholdFilterInstruction = "";
 
     const response = await client.chat.completions.create({
@@ -894,6 +2216,7 @@ export async function POST(req: NextRequest) {
                   additionalProperties: false,
                   properties: {
                     portName: { type: "string" },
+                    portCountry: { type: "string" },
                     terminalName: { type: "string" },
                     berthName: { type: "string" },
                   },

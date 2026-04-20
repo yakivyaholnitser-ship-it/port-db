@@ -1197,8 +1197,12 @@ export default function PortsPage() {
                     }))}
                     initialPortId={selectedPortId}
                     onHighlightPorts={setHighlightedPorts}
-                    onOpenPort={(portName) => {
+                    onOpenPort={(portName, portCountry) => {
                       const matched = ports.find(
+                        (port) =>
+                          port.name.toLowerCase() === portName.toLowerCase() &&
+                          (!portCountry || (port.country ?? "").toLowerCase() === portCountry.toLowerCase())
+                      ) ?? ports.find(
                         (port) => port.name.toLowerCase() === portName.toLowerCase()
                       );
                       if (matched) {
@@ -1207,8 +1211,12 @@ export default function PortsPage() {
                         setSelectedBerthName(null);
                       }
                     }}
-                    onOpenLocation={({ portName, terminalName, berthName }) => {
+                    onOpenLocation={({ portName, portCountry, terminalName, berthName }) => {
                       const matched = ports.find(
+                        (port) =>
+                          port.name.toLowerCase() === portName.toLowerCase() &&
+                          (!portCountry || (port.country ?? "").toLowerCase() === portCountry.toLowerCase())
+                      ) ?? ports.find(
                         (port) => port.name.toLowerCase() === portName.toLowerCase()
                       );
                       if (!matched) return;
