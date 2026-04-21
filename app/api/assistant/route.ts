@@ -157,6 +157,19 @@ type ParsedBunkerQuestion = {
   terminalContextName?: string;
 };
 
+type ParsedRestrictionQuestion = {
+  scope: "port" | "terminal" | "berth";
+  portContextName?: string;
+  terminalContextName?: string;
+};
+
+type ParsedSummaryContext = {
+  scope: "port" | "terminal" | "berth";
+  portContextName?: string;
+  terminalContextName?: string;
+  berthContextName?: string;
+};
+
 type ResultRow = {
   portName: string;
   terminalName?: string;
@@ -236,6 +249,10 @@ Rules:
 - Only include port names that exist in the provided DB context.
 - For threshold/filter questions like "which ports have draft over 13m", list only the matching ports by default.
 - Do not include excluded ports, near misses, or "below threshold" examples unless the user explicitly asks for exclusions or comparison.
+- When the user asks about "restrictions", do not limit yourself to facts literally stored under category "restriction".
+- In restriction answers, treat vessel-limiting categories as part of the restriction stack: draft, LOA, beam, DWT/deadweight, displacement, air draft, density/salinity when it affects draft, UKC, freeboard, trim, tide constraints, and explicit operational limitation notes.
+- Cleaning, bunkering, sulphur, and transit can be included in a restrictions answer when they materially limit operations, but they should come after the core vessel-size / hydro / draft restrictions.
+- If a port or terminal has explicit size limits like max draft, max LOA, max beam, or deadweight, those should be surfaced first in a restrictions answer even if there is also a generic "no restriction" note elsewhere.
 - For bunkering-location questions, treat anchorage, alongside, truck, and barge as different meanings. Do not collapse them together.
 - "Alongside" means bunkering at berth / alongside the vessel. It is not the same as anchorage.
 - If the user asks whether bunkering is allowed alongside, a match may include "Bunkering only alongside" or "Bunkering at anchorage or alongside", but not "Bunkering only at anchorage".
@@ -368,6 +385,744 @@ function bunkerQuestionInstruction(question: string) {
   }
 
   return `\n\n${scopedRules.join("\n")}`;
+}
+
+function isRestrictionQuestion(question: string) {
+  return /\brestrictions?\b|limitation|limitations|limits?|max draft|max loa|max beam|deadweight|dwt/i.test(
+    question
+  );
+}
+
+function restrictionQuestionInstruction(question: string) {
+  if (!isRestrictionQuestion(question)) return "";
+
+  return `
+
+Restriction-answer rules:
+- The user is asking about restrictions / operational limits.
+- Build the answer as a restriction stack, not as a generic narrative.
+- Surface core vessel and hydro limits first: draft, LOA, beam, DWT/deadweight, displacement, air draft, density, UKC, freeboard, trim, tide.
+- Do not rely only on facts in category "restriction"; include any relevant limiting values from draft/loa/beam/dwt/density/etc.
+- If there is a generic "no restriction" note but also explicit max draft / LOA / beam / deadweight values, treat the explicit numeric limits as the main restriction answer.
+- Only after the core size / draft restrictions, mention secondary operating restrictions like cleaning, bunkering, sulphur, or transit.
+`.trimEnd();
+}
+
+function parseRestrictionQuestion(
+  question: string,
+  ports: PortForFilters[]
+): ParsedRestrictionQuestion | null {
+  if (!isRestrictionQuestion(question) || isSummaryOverviewRequest(question)) return null;
+
+  const portContextName = detectPortContext(question, ports);
+  const terminalContextName = detectTerminalContext(question, ports);
+  let scope: "port" | "terminal" | "berth" = "port";
+  if (/\bberths?\b|\bpiers?\b|\bjetties\b|причал/i.test(question)) scope = "berth";
+  else if (/\bterminals?\b|терминал/i.test(question) || terminalContextName) scope = "terminal";
+
+  if (!portContextName && !terminalContextName) return null;
+
+  return {
+    scope,
+    portContextName: portContextName ?? undefined,
+    terminalContextName: terminalContextName ?? undefined,
+  };
+}
+
+function isSecondaryRestrictionFact(fact: FactForFilters) {
+  const category = fact.category.trim().toLowerCase();
+  return ["cleaning", "bunker", "sulphur", "transit", "restriction"].includes(category);
+}
+
+function isRestrictionOtherFact(fact: FactForFilters) {
+  const category = fact.category.trim().toLowerCase();
+  if (category !== "other") return false;
+  const haystack = factHaystack(fact);
+  return (
+    /\brestrict/i.test(haystack) ||
+    /\bcleaning\b/.test(haystack) ||
+    /\bbunker/i.test(haystack) ||
+    /\bsulphur\b|\bsulfur\b/.test(haystack) ||
+    /\btransit\b/.test(haystack) ||
+    /\bdisplacement\b/.test(haystack)
+  );
+}
+
+function restrictionLocationLabel(
+  portName: string,
+  fact: FactForFilters,
+  requestedScope: "port" | "terminal" | "berth"
+) {
+  if (requestedScope === "berth") {
+    return [fact.terminal?.name, fact.berth?.name].filter(Boolean).join(" > ") || portName;
+  }
+  if (requestedScope === "terminal") {
+    return fact.terminal?.name ?? portName;
+  }
+  return scopeLabel(portName, fact.scope, fact.terminal?.name, fact.berth?.name);
+}
+
+function restrictionScopeLabel(fact: FactForFilters) {
+  if (fact.scope === PortFactScope.BERTH) return "Berth-specific";
+  if (fact.scope === PortFactScope.TERMINAL) return "Terminal-specific";
+  return "Port-level";
+}
+
+function collectRestrictionFactsWithInheritance(args: {
+  port: PortForFilters;
+  query: ParsedRestrictionQuestion;
+  predicate: (fact: FactForFilters) => boolean;
+}) {
+  const allFacts = args.port.facts.filter(args.predicate);
+
+  if (args.query.scope === "port") {
+    return {
+      facts: allFacts,
+      inherited: false,
+    };
+  }
+
+  if (args.query.scope === "terminal") {
+    const terminalFacts = allFacts.filter(
+      (fact) =>
+        (fact.terminal?.name ?? "").toLowerCase() === (args.query.terminalContextName ?? "").toLowerCase()
+    );
+    if (terminalFacts.length > 0) {
+      return {
+        facts: terminalFacts,
+        inherited: false,
+      };
+    }
+
+    const portFacts = allFacts.filter((fact) => fact.scope === PortFactScope.PORT);
+    return {
+      facts: portFacts,
+      inherited: portFacts.length > 0,
+    };
+  }
+
+  const berthFacts = allFacts.filter(
+    (fact) =>
+      Boolean(fact.berth?.name) &&
+      (fact.terminal?.name ?? "").toLowerCase() === (args.query.terminalContextName ?? "").toLowerCase()
+  );
+  if (berthFacts.length > 0) {
+    return {
+      facts: berthFacts,
+      inherited: false,
+    };
+  }
+
+  const terminalFacts = allFacts.filter(
+    (fact) =>
+      Boolean(fact.terminal?.name) &&
+      (fact.terminal?.name ?? "").toLowerCase() === (args.query.terminalContextName ?? "").toLowerCase() &&
+      fact.scope !== PortFactScope.PORT
+  );
+  if (terminalFacts.length > 0) {
+    return {
+      facts: terminalFacts,
+      inherited: true,
+    };
+  }
+
+  const portFacts = allFacts.filter((fact) => fact.scope === PortFactScope.PORT);
+  return {
+    facts: portFacts,
+    inherited: portFacts.length > 0,
+  };
+}
+
+function summaryCategoryKey(fact: FactForFilters) {
+  const derived = deriveFilterCategory(fact);
+  if (derived) return derived;
+  return fact.category.trim().toLowerCase();
+}
+
+function summaryCategoryLabel(categoryKey: string) {
+  const numeric = NUMERIC_PARAMETER_CONFIG.find((item) => item.parameter === categoryKey);
+  if (numeric) return numeric.label;
+
+  const labelMap = new Map<string, string>([
+    ["equipment", "Equipment"],
+    ["cargo", "Cargo"],
+    ["bunker", "Bunkering"],
+    ["cleaning", "Cleaning"],
+    ["sulphur", "Sulphur"],
+    ["survey", "Survey"],
+    ["transit", "Transit"],
+    ["restriction", "Operational Notes"],
+    ["other", "Other"],
+  ]);
+  return labelMap.get(categoryKey) ?? categoryKey.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function summaryCategoryOrder(categoryKey: string) {
+  const order = [
+    "draft",
+    "loa",
+    "beam",
+    "density",
+    "air_draft",
+    "dwt",
+    "ukc",
+    "freeboard",
+    "trim",
+    "tide",
+    "load_rate",
+    "discharge_rate",
+    "shifts",
+    "gangs",
+    "equipment",
+    "cargo",
+    "restriction",
+    "bunker",
+    "cleaning",
+    "sulphur",
+    "survey",
+    "transit",
+    "other",
+  ];
+  const index = order.indexOf(categoryKey);
+  return index === -1 ? 999 : index;
+}
+
+function collectSummaryFactsWithInheritance(args: {
+  port: PortForFilters;
+  query: ParsedSummaryContext;
+  categoryKey: string;
+}) {
+  const categoryFacts = args.port.facts.filter((fact) => summaryCategoryKey(fact) === args.categoryKey);
+
+  if (args.query.scope === "port") {
+    return {
+      facts: categoryFacts,
+      inheritedFrom: null as null | "port" | "terminal",
+    };
+  }
+
+  if (args.query.scope === "terminal") {
+    const terminalFacts = categoryFacts.filter(
+      (fact) =>
+        (fact.terminal?.name ?? "").toLowerCase() === (args.query.terminalContextName ?? "").toLowerCase()
+    );
+    if (terminalFacts.length > 0) {
+      return {
+        facts: terminalFacts,
+        inheritedFrom: null as null | "port" | "terminal",
+      };
+    }
+
+    const portFacts = categoryFacts.filter((fact) => fact.scope === PortFactScope.PORT);
+    return {
+      facts: portFacts,
+      inheritedFrom: portFacts.length > 0 ? ("port" as const) : null,
+    };
+  }
+
+  const berthFacts = categoryFacts.filter(
+    (fact) =>
+      (fact.berth?.name ?? "").toLowerCase() === (args.query.berthContextName ?? "").toLowerCase()
+  );
+  if (berthFacts.length > 0) {
+    return {
+      facts: berthFacts,
+      inheritedFrom: null as null | "port" | "terminal",
+    };
+  }
+
+  const terminalFacts = categoryFacts.filter(
+    (fact) =>
+      (fact.terminal?.name ?? "").toLowerCase() === (args.query.terminalContextName ?? "").toLowerCase() &&
+      fact.scope !== PortFactScope.PORT
+  );
+  if (terminalFacts.length > 0) {
+    return {
+      facts: terminalFacts,
+      inheritedFrom: "terminal" as const,
+    };
+  }
+
+  const portFacts = categoryFacts.filter((fact) => fact.scope === PortFactScope.PORT);
+  return {
+    facts: portFacts,
+    inheritedFrom: portFacts.length > 0 ? ("port" as const) : null,
+  };
+}
+
+function summaryInheritanceLabel(inheritedFrom: null | "port" | "terminal") {
+  if (inheritedFrom === "port") return "Inherited from port";
+  if (inheritedFrom === "terminal") return "Inherited from terminal";
+  return null;
+}
+
+function summaryEffectiveContextLabel(
+  portName: string,
+  fact: FactForFilters,
+  query: ParsedSummaryContext
+) {
+  if (query.scope === "terminal") {
+    return (fact.terminal?.name ?? fact.berth?.name ?? portName).trim().toLowerCase();
+  }
+  if (query.scope === "berth") {
+    return (fact.berth?.name ?? fact.terminal?.name ?? portName).trim().toLowerCase();
+  }
+  return portName.trim().toLowerCase();
+}
+
+function summaryDisplayValueForCategory(categoryKey: string, fact: FactForFilters) {
+  const numericConfig = NUMERIC_PARAMETER_CONFIG.find((item) => item.parameter === categoryKey);
+  if (numericConfig) {
+    return restrictionDisplayValue({
+      fact,
+      parameter: categoryKey as NumericParameter,
+    });
+  }
+  return factRawDisplayValue(fact.value, fact.unit);
+}
+
+function dedupeSummaryFacts(args: {
+  portName: string;
+  query: ParsedSummaryContext;
+  categoryKey: string;
+  facts: FactForFilters[];
+}) {
+  const deduped = new Map<string, FactForFilters>();
+
+  for (const fact of args.facts) {
+    const displayValue = summaryDisplayValueForCategory(args.categoryKey, fact);
+    const dedupeKey = [
+      fact.sourceRecord?.sourceDate?.toISOString() ?? fact.createdAt.toISOString(),
+      summaryEffectiveContextLabel(args.portName, fact, args.query),
+      args.categoryKey,
+      displayValue.toLowerCase(),
+      fact.sourceRecord ? "with_source" : "no_source",
+    ].join("::");
+
+    const existing = deduped.get(dedupeKey);
+    if (!existing) {
+      deduped.set(dedupeKey, fact);
+      continue;
+    }
+
+    const existingScopeRank =
+      existing.scope === PortFactScope.BERTH ? 3 : existing.scope === PortFactScope.TERMINAL ? 2 : 1;
+    const nextScopeRank =
+      fact.scope === PortFactScope.BERTH ? 3 : fact.scope === PortFactScope.TERMINAL ? 2 : 1;
+
+    if (nextScopeRank > existingScopeRank) {
+      deduped.set(dedupeKey, fact);
+    }
+  }
+
+  return Array.from(deduped.values());
+}
+
+function buildSummaryOverviewAnswer(args: {
+  ports: PortForFilters[];
+  query: ParsedSummaryContext;
+}) {
+  const targetPort = args.ports.find((port) =>
+    args.query.portContextName
+      ? port.name.toLowerCase() === args.query.portContextName.toLowerCase()
+      : true
+  );
+
+  if (!targetPort) {
+    return {
+      answer: "No matching summary context found.",
+      highlightedPorts: [] as string[],
+      matchedLocations: [] as MatchedLocation[],
+      resultRows: [] as ResultRow[],
+    };
+  }
+
+  const allCategoryKeys = Array.from(
+    new Set(targetPort.facts.map((fact) => summaryCategoryKey(fact)))
+  ).sort((a, b) => summaryCategoryOrder(a) - summaryCategoryOrder(b) || a.localeCompare(b));
+
+  const answerLines: string[] = [];
+  const matchedLocations: MatchedLocation[] = [];
+  const resultRows: ResultRow[] = [];
+
+  const header =
+    args.query.scope === "berth"
+      ? `Summary overview for ${args.query.berthContextName}${args.query.terminalContextName ? ` in ${args.query.terminalContextName}` : ""}, ${targetPort.name}:`
+      : args.query.scope === "terminal"
+        ? `Summary overview for ${args.query.terminalContextName} at ${targetPort.name}:`
+        : `Summary overview for ${targetPort.name}${targetPort.country ? `, ${targetPort.country}` : ""}:`;
+  answerLines.push(header);
+
+  for (const categoryKey of allCategoryKeys) {
+    const { facts, inheritedFrom } = collectSummaryFactsWithInheritance({
+      port: targetPort,
+      query: args.query,
+      categoryKey,
+    });
+    if (facts.length === 0) continue;
+
+    const dedupedFacts = dedupeSummaryFacts({
+      portName: targetPort.name,
+      query: args.query,
+      categoryKey,
+      facts,
+    });
+
+    const counts = new Map<string, number>();
+    const countOrder = new Map<string, number>();
+    const sortedFacts = [...dedupedFacts].sort((a, b) => {
+      const aTime = a.sourceRecord?.sourceDate?.getTime() ?? a.createdAt.getTime();
+      const bTime = b.sourceRecord?.sourceDate?.getTime() ?? b.createdAt.getTime();
+      return bTime - aTime;
+    });
+
+    for (const fact of sortedFacts) {
+      const displayValue = summaryDisplayValueForCategory(categoryKey, fact);
+      if (!countOrder.has(displayValue)) countOrder.set(displayValue, countOrder.size);
+      counts.set(displayValue, (counts.get(displayValue) ?? 0) + 1);
+    }
+
+    const repeatedValueLines = Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || (countOrder.get(a[0]) ?? 0) - (countOrder.get(b[0]) ?? 0))
+      .map(([value, count]) => `- ${value} — ${count} mention${count === 1 ? "" : "s"}`);
+
+    const latestMentionLines = sortedFacts.slice(0, 5).map((fact) => {
+      const displayValue = summaryDisplayValueForCategory(categoryKey, fact);
+      const date = fmtDate(fact.sourceRecord?.sourceDate ?? fact.createdAt);
+      const notePart = fact.notes ? ` (${fact.notes})` : "";
+      return `- ${displayValue}${notePart} — ${date}`;
+    });
+
+    const inheritanceLabel = summaryInheritanceLabel(inheritedFrom);
+    answerLines.push(`${summaryCategoryLabel(categoryKey)}${inheritanceLabel ? ` [${inheritanceLabel}]` : ""}:`);
+    answerLines.push(...repeatedValueLines);
+    answerLines.push("Latest 5 mentions:");
+    answerLines.push(...latestMentionLines);
+
+    const distinctValues = counts.size;
+    if (distinctValues > 1) {
+      answerLines.push(`Evidence note: ${distinctValues} distinct values recorded for this category.`);
+    }
+
+    const representativeFact = sortedFacts[0];
+    matchedLocations.push(
+      matchedLocationForScope(
+        targetPort.name,
+        targetPort.country,
+        representativeFact,
+        args.query.scope
+      )
+    );
+    resultRows.push({
+      portName: targetPort.name,
+      terminalName: representativeFact.terminal?.name ?? undefined,
+      berthName: args.query.scope === "berth" ? representativeFact.berth?.name ?? undefined : undefined,
+      matchLabel: `${summaryCategoryLabel(categoryKey)} summary`,
+      matchValue: repeatedValueLines[0]?.replace(/^- /, "") ?? summaryCategoryLabel(categoryKey),
+      date: fmtDate(representativeFact.sourceRecord?.sourceDate ?? representativeFact.createdAt),
+    });
+  }
+
+  return {
+    answer: answerLines.join("\n"),
+    highlightedPorts: [targetPort.name],
+    matchedLocations: Array.from(
+      new Map(
+        matchedLocations.map((item) => [
+          `${item.portName}__${item.portCountry ?? ""}__${item.terminalName ?? ""}__${item.berthName ?? ""}`,
+          item,
+        ])
+      ).values()
+    ),
+    resultRows,
+  };
+}
+
+function matchesRestrictionCoreParameter(
+  fact: FactForFilters,
+  parameter: NumericParameter
+) {
+  const base = fact.category.trim().toLowerCase();
+  const haystack = factHaystack(fact);
+
+  if (parameter === "draft") {
+    return base === "draft" || /\bmax draft\b|\bmaximum draft\b|\bdraft alongside\b|\bdraft along side\b/.test(haystack);
+  }
+  if (parameter === "loa") {
+    return base === "loa" || /\bloa\b|\blength overall\b/.test(haystack);
+  }
+  if (parameter === "beam") {
+    return base === "beam" || /\bbeam\b/.test(haystack);
+  }
+  if (parameter === "dwt") {
+    return base === "dwt" || /\bdwt\b|\bdeadweight\b/.test(haystack);
+  }
+  if (parameter === "density") {
+    return base === "density" || /\bdensity\b|\bspecific gravity\b|\bsalinity\b/.test(haystack);
+  }
+  if (parameter === "air_draft") {
+    return base === "air_draft" || /\bair draft\b/.test(haystack);
+  }
+  if (parameter === "ukc") {
+    return base === "ukc" || /\bukc\b|under keel clearance/.test(haystack);
+  }
+  if (parameter === "freeboard") {
+    return base === "freeboard" || /\bfreeboard\b/.test(haystack);
+  }
+  if (parameter === "trim") {
+    return base === "trim" || /\btrim\b/.test(haystack);
+  }
+  if (parameter === "tide") {
+    return base === "tide" || /\btide\b|\bmllw\b|\bmlws\b|\bhigh water\b|\blow water\b/.test(haystack);
+  }
+  return false;
+}
+
+function restrictionDisplayValue(args: {
+  fact: FactForFilters;
+  parameter: NumericParameter;
+}) {
+  const family =
+    NUMERIC_PARAMETER_CONFIG.find((item) => item.parameter === args.parameter)?.family ?? "plain";
+
+  const valueHasNumber = /\d/.test(args.fact.value);
+  const unitHasLengthHint = /\bm\b|\bft\b|\bfeet\b|\bfoot\b/i.test(args.fact.unit ?? "");
+
+  if (
+    (args.parameter === "draft" ||
+      args.parameter === "loa" ||
+      args.parameter === "beam" ||
+      args.parameter === "air_draft" ||
+      args.parameter === "ukc" ||
+      args.parameter === "freeboard" ||
+      args.parameter === "trim") &&
+    !valueHasNumber &&
+    !unitHasLengthHint
+  ) {
+    return args.fact.value.trim();
+  }
+
+  if (
+    (args.parameter === "draft" ||
+      args.parameter === "loa" ||
+      args.parameter === "beam" ||
+      args.parameter === "air_draft" ||
+      args.parameter === "ukc" ||
+      args.parameter === "freeboard" ||
+      args.parameter === "trim") &&
+    !valueHasNumber &&
+    args.fact.category.trim().toLowerCase() === "restriction"
+  ) {
+    return args.fact.value.trim();
+  }
+
+  const numericValue = parseNumericMeters(
+    {
+      value: args.fact.value,
+      unit: args.fact.unit,
+      notes: args.fact.notes,
+      rawSnippet: args.fact.rawSnippet ?? null,
+    },
+    family
+  );
+
+  if (typeof numericValue !== "number" || !Number.isFinite(numericValue)) {
+    return factRawDisplayValue(args.fact.value, args.fact.unit);
+  }
+
+  return formatFactValueForDeterministicAnswer({
+    fact: args.fact,
+    numericValue,
+    family,
+  });
+}
+
+function buildRestrictionAnswer(args: {
+  ports: PortForFilters[];
+  query: ParsedRestrictionQuestion;
+}) {
+  const coreCategories: Array<{ parameter: NumericParameter; label: string }> = [
+    { parameter: "draft", label: "Draft" },
+    { parameter: "loa", label: "LOA" },
+    { parameter: "beam", label: "Beam" },
+    { parameter: "dwt", label: "DWT / Deadweight" },
+    { parameter: "density", label: "Density" },
+    { parameter: "air_draft", label: "Air Draft" },
+    { parameter: "ukc", label: "UKC" },
+    { parameter: "freeboard", label: "Freeboard" },
+    { parameter: "trim", label: "Trim" },
+    { parameter: "tide", label: "Tide" },
+  ];
+
+  const secondaryLabels = new Map<string, string>([
+    ["cleaning", "Cleaning"],
+    ["bunker", "Bunkering"],
+    ["sulphur", "Sulphur"],
+    ["transit", "Transit"],
+    ["restriction", "Operational Notes"],
+    ["other", "Other Restrictions"],
+  ]);
+
+  const matchedLocations: MatchedLocation[] = [];
+  const resultRows: ResultRow[] = [];
+  const answerLines: string[] = [];
+
+  const targetPorts = args.ports.filter((port) =>
+    args.query.portContextName
+      ? port.name.toLowerCase() === args.query.portContextName.toLowerCase()
+      : true
+  );
+
+  if (targetPorts.length === 0) {
+    return {
+      answer: "No matching port context found for this restrictions question.",
+      highlightedPorts: [] as string[],
+      matchedLocations: [] as MatchedLocation[],
+      resultRows: [] as ResultRow[],
+    };
+  }
+
+  for (const port of targetPorts) {
+    const coreSections: string[] = [];
+    const missingCoreLabels: string[] = [];
+
+    for (const config of coreCategories) {
+      const { facts, inherited } = collectRestrictionFactsWithInheritance({
+        port,
+        query: args.query,
+        predicate: (fact) => matchesRestrictionCoreParameter(fact, config.parameter),
+      });
+
+      const sortedFacts = facts
+        .sort((a, b) => {
+          const aTime = a.sourceRecord?.sourceDate?.getTime() ?? a.createdAt.getTime();
+          const bTime = b.sourceRecord?.sourceDate?.getTime() ?? b.createdAt.getTime();
+          return bTime - aTime;
+        });
+
+      if (sortedFacts.length === 0) {
+        missingCoreLabels.push(config.label);
+        continue;
+      }
+
+      const seen = new Set<string>();
+      const lines: string[] = [];
+
+      for (const fact of sortedFacts) {
+        const valueKey = `${fact.value}__${fact.unit ?? ""}__${fact.notes ?? ""}__${fact.terminal?.name ?? ""}__${fact.berth?.name ?? ""}`;
+        if (seen.has(valueKey)) continue;
+        seen.add(valueKey);
+
+        const formattedValue = restrictionDisplayValue({
+          fact,
+          parameter: config.parameter,
+        });
+        const location = restrictionLocationLabel(port.name, fact, args.query.scope);
+        const date = fmtDate(fact.sourceRecord?.sourceDate ?? fact.createdAt);
+        const notePart = fact.notes ? ` (${fact.notes})` : "";
+        const scopePart = inherited ? ` [${restrictionScopeLabel(fact)} applies]` : "";
+        lines.push(`  - ${location} — ${formattedValue}${notePart}${scopePart} (${date})`);
+
+        matchedLocations.push(matchedLocationForScope(port.name, port.country, fact, args.query.scope));
+        resultRows.push({
+          portName: port.name,
+          terminalName: fact.terminal?.name ?? undefined,
+          berthName: args.query.scope === "berth" ? fact.berth?.name ?? undefined : undefined,
+          matchLabel: `${config.label} restriction`,
+          matchValue: formattedValue,
+          date,
+        });
+
+        if (lines.length >= 4) break;
+      }
+
+      if (lines.length > 0) {
+        coreSections.push(`${config.label}:\n${lines.join("\n")}`);
+      }
+    }
+
+    const { facts: secondaryFacts } = collectRestrictionFactsWithInheritance({
+      port,
+      query: args.query,
+      predicate: (fact) => isSecondaryRestrictionFact(fact) || isRestrictionOtherFact(fact),
+    });
+    const sortedSecondaryFacts = secondaryFacts
+      .sort((a, b) => {
+        const aTime = a.sourceRecord?.sourceDate?.getTime() ?? a.createdAt.getTime();
+        const bTime = b.sourceRecord?.sourceDate?.getTime() ?? b.createdAt.getTime();
+        return bTime - aTime;
+      });
+
+    const secondaryGroups = new Map<string, string[]>();
+    for (const fact of sortedSecondaryFacts) {
+      const label = secondaryLabels.get(fact.category.trim().toLowerCase()) ?? "Other Restrictions";
+      if (!secondaryGroups.has(label)) secondaryGroups.set(label, []);
+      const lines = secondaryGroups.get(label)!;
+      const location = restrictionLocationLabel(port.name, fact, args.query.scope);
+      const date = fmtDate(fact.sourceRecord?.sourceDate ?? fact.createdAt);
+      const displayValue = factRawDisplayValue(fact.value, fact.unit);
+      const notePart = fact.notes ? ` (${fact.notes})` : "";
+      const inherited =
+        args.query.scope !== "port" &&
+        ((args.query.scope === "terminal" && fact.scope === PortFactScope.PORT) ||
+          (args.query.scope === "berth" &&
+            ((fact.scope === PortFactScope.TERMINAL && (fact.terminal?.name ?? "").toLowerCase() === (args.query.terminalContextName ?? "").toLowerCase()) ||
+              fact.scope === PortFactScope.PORT)));
+      const scopePart = inherited ? ` [${restrictionScopeLabel(fact)} applies]` : "";
+      const line = `  - ${location} — ${displayValue}${notePart}${scopePart} (${date})`;
+      if (!lines.includes(line)) lines.push(line);
+    }
+
+    answerLines.push(
+      `${args.query.scope === "terminal" && args.query.terminalContextName ? `Restrictions for ${args.query.terminalContextName} at ${port.name}${port.country ? `, ${port.country}` : ""}` : `Restrictions for ${port.name}${port.country ? `, ${port.country}` : ""}`}:`
+    );
+
+    if (coreSections.length > 0) {
+      answerLines.push(
+        args.query.scope === "terminal" && args.query.terminalContextName
+          ? "Core vessel / hydro restrictions applicable to this terminal:"
+          : args.query.scope === "berth"
+            ? "Core vessel / hydro restrictions applicable to this berth:"
+            : "Core vessel / hydro restrictions:"
+      );
+      answerLines.push(...coreSections);
+    } else {
+      answerLines.push("Core vessel / hydro restrictions: No explicit draft / LOA / beam / DWT-style limits found.");
+    }
+
+    if (missingCoreLabels.length > 0) {
+      answerLines.push(`Not explicitly stated: ${missingCoreLabels.join(", ")}.`);
+    }
+
+    if (secondaryGroups.size > 0) {
+      answerLines.push("Secondary operating restrictions:");
+      for (const [label, lines] of secondaryGroups.entries()) {
+        answerLines.push(`${label}:`);
+        answerLines.push(...lines.slice(0, 4));
+      }
+    }
+  }
+
+  return {
+    answer: answerLines.join("\n"),
+    highlightedPorts: Array.from(new Set(targetPorts.map((port) => port.name))),
+    matchedLocations: Array.from(
+      new Map(
+        matchedLocations.map((item) => [
+          `${item.portName}__${item.portCountry ?? ""}__${item.terminalName ?? ""}__${item.berthName ?? ""}`,
+          item,
+        ])
+      ).values()
+    ),
+    resultRows: Array.from(
+      new Map(
+        resultRows.map((row) => [
+          `${row.portName}__${row.terminalName ?? ""}__${row.berthName ?? ""}__${row.matchLabel}__${row.matchValue}`,
+          row,
+        ])
+      ).values()
+    ),
+  };
 }
 
 function parseBunkerQuestion(
@@ -1174,6 +1929,99 @@ function detectTerminalContext(question: string, ports: PortForFilters[]) {
     .filter((name) => lower.includes(name.toLowerCase()))
     .sort((a, b) => b.length - a.length);
   return matches[0];
+}
+
+function detectBerthContext(question: string, ports: PortForFilters[]) {
+  const lower = question.toLowerCase();
+  const berthNames = Array.from(
+    new Set(
+      ports.flatMap((port) =>
+        port.facts.map((fact) => fact.berth?.name).filter((name): name is string => Boolean(name))
+      )
+    )
+  );
+  const matches = berthNames
+    .filter((name) => lower.includes(name.toLowerCase()))
+    .sort((a, b) => b.length - a.length);
+  return matches[0];
+}
+
+function parseSummaryContext(
+  latestUserMessage: string,
+  routingQuestion: string,
+  ports: PortForFilters[]
+): ParsedSummaryContext | null {
+  if (!isSummaryOverviewRequest(routingQuestion)) return null;
+
+  const raw = latestUserMessage;
+  const berthInsideTerminalMatch = raw.match(
+    /Focus only on berth "([^"]+)" inside terminal "([^"]+)" in port "([^"]+)"/i
+  );
+  if (berthInsideTerminalMatch) {
+    return {
+      scope: "berth",
+      berthContextName: berthInsideTerminalMatch[1],
+      terminalContextName: berthInsideTerminalMatch[2],
+      portContextName: berthInsideTerminalMatch[3],
+    };
+  }
+
+  const berthMatch = raw.match(/Focus only on berth "([^"]+)" in port "([^"]+)"/i);
+  if (berthMatch) {
+    return {
+      scope: "berth",
+      berthContextName: berthMatch[1],
+      portContextName: berthMatch[2],
+    };
+  }
+
+  const terminalMatch = raw.match(/Focus only on terminal "([^"]+)" in port "([^"]+)"/i);
+  if (terminalMatch) {
+    return {
+      scope: "terminal",
+      terminalContextName: terminalMatch[1],
+      portContextName: terminalMatch[2],
+    };
+  }
+
+  const portMatch = raw.match(/Focus only on port "([^"]+)"/i);
+  if (portMatch) {
+    return {
+      scope: "port",
+      portContextName: portMatch[1],
+    };
+  }
+
+  const berthContextName = detectBerthContext(latestUserMessage, ports) ?? detectBerthContext(routingQuestion, ports);
+  const terminalContextName =
+    detectTerminalContext(latestUserMessage, ports) ?? detectTerminalContext(routingQuestion, ports);
+  const portContextName = detectPortContext(latestUserMessage, ports) ?? detectPortContext(routingQuestion, ports);
+
+  if (berthContextName) {
+    return {
+      scope: "berth",
+      berthContextName,
+      terminalContextName: terminalContextName ?? undefined,
+      portContextName: portContextName ?? undefined,
+    };
+  }
+
+  if (terminalContextName) {
+    return {
+      scope: "terminal",
+      terminalContextName,
+      portContextName: portContextName ?? undefined,
+    };
+  }
+
+  if (portContextName) {
+    return {
+      scope: "port",
+      portContextName,
+    };
+  }
+
+  return null;
 }
 
 function shouldTrySemanticPlanner(question: string) {
@@ -2080,6 +2928,8 @@ export async function POST(req: NextRequest) {
     const deterministicQuery =
       semanticPlannedQuery ?? parseDeterministicQuery(routingQuestion, ports);
     const bunkerQuery = parseBunkerQuestion(routingQuestion, ports);
+    const restrictionQuery = parseRestrictionQuestion(routingQuestion, ports);
+    const summaryContext = parseSummaryContext(latestUserMessage, routingQuestion, ports);
 
     if (!ports.length) {
       return NextResponse.json(
@@ -2091,12 +2941,28 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (isSummaryRequest && summaryContext) {
+      const summaryAnswer = buildSummaryOverviewAnswer({
+        ports,
+        query: summaryContext,
+      });
+      return NextResponse.json(summaryAnswer, { status: 200 });
+    }
+
     if (!isSummaryRequest && bunkerQuery) {
       const bunkerAnswer = buildBunkerAnswer({
         ports,
         query: bunkerQuery,
       });
       return NextResponse.json(bunkerAnswer, { status: 200 });
+    }
+
+    if (!isSummaryRequest && restrictionQuery) {
+      const restrictionAnswer = buildRestrictionAnswer({
+        ports,
+        query: restrictionQuery,
+      });
+      return NextResponse.json(restrictionAnswer, { status: 200 });
     }
 
     if (
@@ -2191,7 +3057,7 @@ export async function POST(req: NextRequest) {
     }
 
     const dbContext = contextBlocks.join("\n\n");
-    const systemWithContext = `${systemPrompt}${bunkerQuestionInstruction(routingQuestion)}\n\n=== PORT INTELLIGENCE DB ===\n\n${dbContext}`;
+    const systemWithContext = `${systemPrompt}${restrictionQuestionInstruction(routingQuestion)}${bunkerQuestionInstruction(routingQuestion)}\n\n=== PORT INTELLIGENCE DB ===\n\n${dbContext}`;
     const thresholdFilterInstruction = "";
 
     const response = await client.chat.completions.create({

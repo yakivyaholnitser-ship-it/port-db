@@ -430,6 +430,17 @@ function parseSourceDateInput(value: string | undefined) {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function normalizeDuplicateText(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/\*\*/g, "")
+    .replace(/^[\s>*-]+/gm, "")
+    .replace(/\r/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+}
+
 function normalizeExtractedOperationalFact(fact: ExtractedFact): ExtractedLocationFact {
   const baseCategory = fact.category!.trim();
   const baseValue = fact.value!.trim();
@@ -637,6 +648,40 @@ export async function POST(req: NextRequest) {
       lat: resolvedLat,
       lon: resolvedLon,
     });
+
+    const candidateSourceRecords = await prisma.sourceRecord.findMany({
+      where: {
+        portId: port.id,
+        sourceName: source?.trim() || null,
+        sourceDate: parsedSourceDate,
+      },
+      include: {
+        facts: true,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    });
+
+    const incomingTextSignature = normalizeDuplicateText(text);
+
+    const duplicateSourceRecord = candidateSourceRecords.find((record) => {
+      const existingTextSignature = normalizeDuplicateText(record.rawText);
+      return existingTextSignature === incomingTextSignature;
+    });
+
+    if (duplicateSourceRecord) {
+      return NextResponse.json({
+        port: { id: port.id, name: port.name, country: port.country },
+        terminal: locationResolution.defaultTerminal
+          ? { id: locationResolution.defaultTerminal.id, name: locationResolution.defaultTerminal.name }
+          : null,
+        berth: locationResolution.defaultBerth
+          ? { id: locationResolution.defaultBerth.id, name: locationResolution.defaultBerth.name }
+          : null,
+        factsAdded: 0,
+        duplicateOfSourceRecordId: duplicateSourceRecord.id,
+      });
+    }
 
     const sourceRecord = await prisma.sourceRecord.create({
       data: {
