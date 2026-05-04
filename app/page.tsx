@@ -990,6 +990,137 @@ export default function PortsPage() {
     );
   }
 
+  function renderNavigatorPanel() {
+    return (
+      <aside className="overflow-hidden rounded-[28px] border border-[color:var(--line-strong)] bg-[color:rgba(8,24,33,0.82)]">
+        <div className="border-b border-[color:var(--line-soft)] px-5 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">
+                Navigator
+              </div>
+              <h2 className="mt-2 text-xl font-semibold text-[color:var(--ink-main)]">Ports & terminals</h2>
+            </div>
+            <div className="rounded-full border border-[color:var(--line-soft)] px-3 py-1 text-xs text-[color:var(--ink-soft)]">
+              {filteredPorts.length}
+            </div>
+          </div>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search port or country..."
+            className="mt-4 w-full rounded-full border border-[color:var(--line-soft)] bg-[color:rgba(7,20,28,0.9)] px-4 py-3 text-sm text-[color:var(--ink-main)] outline-none transition focus:border-[color:var(--accent)]"
+          />
+          {!loading && !loadError && filteredPorts.length > 8 && !search.trim() ? (
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <div className="text-xs text-[color:var(--ink-soft)]">
+                Showing {visiblePorts.length} of {filteredPorts.length} ports
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAllPorts((prev) => !prev)}
+                className="rounded-full border border-[color:var(--line-soft)] px-3 py-1.5 text-xs uppercase tracking-[0.18em] text-[color:var(--accent-soft)] transition hover:border-[color:rgba(113,194,183,0.42)]"
+              >
+                {showAllPorts ? "Show Less" : "See All"}
+              </button>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="max-h-[540px] overflow-y-auto px-3 py-3">
+          {loading ? (
+            <div className="px-3 py-4 text-sm text-[color:var(--ink-soft)]">Loading ledger...</div>
+          ) : loadError ? (
+            <div className="rounded-[22px] border border-[color:rgba(197,79,63,0.3)] bg-[color:rgba(197,79,63,0.08)] px-4 py-4 text-sm text-[color:var(--danger)]">
+              {loadError}
+            </div>
+          ) : filteredPorts.length === 0 ? (
+            <div className="px-3 py-4 text-sm text-[color:var(--ink-soft)]">No matching ports yet.</div>
+          ) : (
+            visiblePorts.map((port) => {
+              const portConflicts = port.conflictCount;
+              const isActive = selectedPortId === port.id;
+
+              return (
+                <div
+                  key={port.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setSelectedPortId(port.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setSelectedPortId(port.id);
+                    }
+                  }}
+                  className={`mb-2 w-full cursor-pointer rounded-[22px] border px-4 py-4 text-left transition ${
+                    isActive
+                      ? "border-[color:rgba(113,194,183,0.42)] bg-[color:rgba(24,64,74,0.72)] shadow-[0_16px_40px_rgba(0,0,0,0.18)]"
+                      : "border-[color:var(--line-soft)] bg-[color:rgba(8,25,34,0.7)] hover:border-[color:rgba(113,194,183,0.28)] hover:bg-[color:rgba(13,35,45,0.78)]"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-base font-semibold text-[color:var(--ink-main)]">{port.name}</div>
+                      <div className="mt-1 text-xs uppercase tracking-[0.18em] text-[color:var(--ink-muted)]">
+                        {port.country || "Country unknown"}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] ${badgeTone(portConflicts)}`}>
+                        {portConflicts === 0 ? "stable" : `${portConflicts} variations`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleDeletePortById(port.id, port.name);
+                        }}
+                        className="rounded-full border border-[color:rgba(197,79,63,0.28)] px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-[color:var(--danger)] transition hover:bg-[color:rgba(197,79,63,0.08)]"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2 text-xs text-[color:var(--ink-soft)]">
+                    <span>{port.factsCount} facts</span>
+                    <span>{port.terminalsCount} terminals</span>
+                    <span>{port.standaloneBerthsCount} standalone berths</span>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        <div className="border-t border-[color:var(--line-soft)] px-5 py-4">
+          <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">Recent evidence</div>
+          <div className="mt-4 space-y-3">
+            {!selectedPort && detailLoading ? (
+              <p className="text-sm text-[color:var(--ink-soft)]">Loading recent evidence...</p>
+            ) : !selectedPort ? (
+              <p className="text-sm text-[color:var(--ink-soft)]">Select a port to inspect recent evidence.</p>
+            ) : sourceMoments.length === 0 ? (
+              <p className="text-sm text-[color:var(--ink-soft)]">No source records yet for this port.</p>
+            ) : (
+              sourceMoments.slice(0, 8).map((item) => (
+                <div
+                  key={item.sourceRecordId}
+                  className="rounded-[18px] border border-[color:var(--line-soft)] bg-[color:rgba(7,24,32,0.74)] p-3"
+                >
+                  <div className="text-sm font-semibold text-[color:var(--ink-main)]">{item.source}</div>
+                  <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-[color:var(--ink-muted)]">
+                    {item.label} · {formatDate(item.sourceDate)}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </aside>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[color:var(--base)] text-[color:var(--ink-main)]">
       <div className="pointer-events-none fixed inset-0 opacity-70">
@@ -1008,8 +1139,8 @@ export default function PortsPage() {
                 Operational evidence, value variation, and berth-level truth in one view.
               </h1>
               <p className="mt-4 max-w-2xl text-sm leading-7 text-[color:var(--ink-soft)] lg:text-[15px]">
-                Structure free-form port messages into a live intelligence ledger, keep every source,
-                and let AI explain where the draft, density, gangs, or restrictions disagree.
+                Turn port updates, agent notes, and terminal details into AI powered, structured,
+                source-backed operational intelligence.
               </p>
             </div>
 
@@ -1053,182 +1184,10 @@ export default function PortsPage() {
           </div>
         </header>
 
-        <div className="mt-4 grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
-          <aside className="overflow-hidden rounded-[28px] border border-[color:var(--line-strong)] bg-[color:rgba(8,24,33,0.82)]">
-            <div className="border-b border-[color:var(--line-soft)] px-5 py-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">
-                    Navigator
-                  </div>
-                  <h2 className="mt-2 text-xl font-semibold text-[color:var(--ink-main)]">Ports & terminals</h2>
-                </div>
-                <div className="rounded-full border border-[color:var(--line-soft)] px-3 py-1 text-xs text-[color:var(--ink-soft)]">
-                  {filteredPorts.length}
-                </div>
-              </div>
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search port or country..."
-                className="mt-4 w-full rounded-full border border-[color:var(--line-soft)] bg-[color:rgba(7,20,28,0.9)] px-4 py-3 text-sm text-[color:var(--ink-main)] outline-none transition focus:border-[color:var(--accent)]"
-              />
-              {!loading && !loadError && filteredPorts.length > 8 && !search.trim() ? (
-                <div className="mt-4 flex items-center justify-between gap-3">
-                  <div className="text-xs text-[color:var(--ink-soft)]">
-                    Showing {visiblePorts.length} of {filteredPorts.length} ports
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowAllPorts((prev) => !prev)}
-                    className="rounded-full border border-[color:var(--line-soft)] px-3 py-1.5 text-xs uppercase tracking-[0.18em] text-[color:var(--accent-soft)] transition hover:border-[color:rgba(113,194,183,0.42)]"
-                  >
-                    {showAllPorts ? "Show Less" : "See All"}
-                  </button>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="max-h-[calc(100vh-280px)] overflow-y-auto px-3 py-3">
-              {loading ? (
-                <div className="px-3 py-4 text-sm text-[color:var(--ink-soft)]">Loading ledger...</div>
-              ) : loadError ? (
-                <div className="rounded-[22px] border border-[color:rgba(197,79,63,0.3)] bg-[color:rgba(197,79,63,0.08)] px-4 py-4 text-sm text-[color:var(--danger)]">
-                  {loadError}
-                </div>
-              ) : filteredPorts.length === 0 ? (
-                <div className="px-3 py-4 text-sm text-[color:var(--ink-soft)]">No matching ports yet.</div>
-              ) : (
-                visiblePorts.map((port) => {
-                  const portConflicts = port.conflictCount;
-                  const isActive = selectedPortId === port.id;
-
-                  return (
-                    <div
-                      key={port.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setSelectedPortId(port.id)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          setSelectedPortId(port.id);
-                        }
-                      }}
-                      className={`mb-2 w-full cursor-pointer rounded-[22px] border px-4 py-4 text-left transition ${
-                        isActive
-                          ? "border-[color:rgba(113,194,183,0.42)] bg-[color:rgba(24,64,74,0.72)] shadow-[0_16px_40px_rgba(0,0,0,0.18)]"
-                          : "border-[color:var(--line-soft)] bg-[color:rgba(8,25,34,0.7)] hover:border-[color:rgba(113,194,183,0.28)] hover:bg-[color:rgba(13,35,45,0.78)]"
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-base font-semibold text-[color:var(--ink-main)]">{port.name}</div>
-                          <div className="mt-1 text-xs uppercase tracking-[0.18em] text-[color:var(--ink-muted)]">
-                            {port.country || "Country unknown"}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className={`rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] ${badgeTone(portConflicts)}`}>
-                            {portConflicts === 0 ? "stable" : `${portConflicts} variations`}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              handleDeletePortById(port.id, port.name);
-                            }}
-                            className="rounded-full border border-[color:rgba(197,79,63,0.28)] px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-[color:var(--danger)] transition hover:bg-[color:rgba(197,79,63,0.08)]"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                      <div className="mt-4 flex flex-wrap gap-2 text-xs text-[color:var(--ink-soft)]">
-                        <span>{port.factsCount} facts</span>
-                        <span>{port.terminalsCount} terminals</span>
-                        <span>{port.standaloneBerthsCount} standalone berths</span>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-
-            <div className="border-t border-[color:var(--line-soft)] px-5 py-4">
-              <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">Recent evidence</div>
-              <div className="mt-4 space-y-3">
-                {!selectedPort && detailLoading ? (
-                  <p className="text-sm text-[color:var(--ink-soft)]">Loading recent evidence...</p>
-                ) : !selectedPort ? (
-                  <p className="text-sm text-[color:var(--ink-soft)]">Select a port to inspect recent evidence.</p>
-                ) : sourceMoments.length === 0 ? (
-                  <p className="text-sm text-[color:var(--ink-soft)]">No source records yet for this port.</p>
-                ) : (
-                  sourceMoments.slice(0, 8).map((item) => (
-                    <div
-                      key={item.sourceRecordId}
-                      className="rounded-[18px] border border-[color:var(--line-soft)] bg-[color:rgba(7,24,32,0.74)] p-3"
-                    >
-                      <div className="text-sm font-semibold text-[color:var(--ink-main)]">{item.source}</div>
-                      <div className="mt-1 text-[11px] uppercase tracking-[0.16em] text-[color:var(--ink-muted)]">
-                        {item.label} · {formatDate(item.sourceDate)}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </aside>
-
+        <div className="mt-4">
           <main className="space-y-4">
-            <section className="overflow-hidden rounded-[30px] border border-[color:var(--line-strong)] bg-[color:rgba(8,28,39,0.84)]">
-              <div className="mt-5 rounded-[28px] bg-[color:rgba(8,24,33,0.82)] p-5">
-                <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">AI Analyst</div>
-                <div className="mt-2 max-w-2xl text-sm leading-7 text-[color:var(--ink-soft)]">
-                  Ask about draft margins, berth restrictions, density assumptions, or compare sources for the selected port and its terminals.
-                </div>
-                <div className="mt-5">
-                  <AIAssistant
-                    ports={ports.map((port) => ({
-                      id: port.id,
-                      name: port.name,
-                      country: port.country,
-                    }))}
-                    initialPortId={selectedPortId}
-                    onHighlightPorts={setHighlightedPorts}
-                    onOpenPort={(portName, portCountry) => {
-                      const matched = ports.find(
-                        (port) =>
-                          port.name.toLowerCase() === portName.toLowerCase() &&
-                          (!portCountry || (port.country ?? "").toLowerCase() === portCountry.toLowerCase())
-                      ) ?? ports.find(
-                        (port) => port.name.toLowerCase() === portName.toLowerCase()
-                      );
-                      if (matched) {
-                        setSelectedPortId(matched.id);
-                        setSelectedTerminalName(null);
-                        setSelectedBerthName(null);
-                      }
-                    }}
-                    onOpenLocation={({ portName, portCountry, terminalName, berthName }) => {
-                      const matched = ports.find(
-                        (port) =>
-                          port.name.toLowerCase() === portName.toLowerCase() &&
-                          (!portCountry || (port.country ?? "").toLowerCase() === portCountry.toLowerCase())
-                      ) ?? ports.find(
-                        (port) => port.name.toLowerCase() === portName.toLowerCase()
-                      );
-                      if (!matched) return;
-                      setSelectedPortId(matched.id);
-                      setSelectedTerminalName(terminalName ?? null);
-                      setSelectedBerthName(berthName ?? null);
-                    }}
-                  />
-                </div>
-              </div>
-
-              <div className="mt-5 grid gap-4 border-b border-[color:var(--line-soft)] px-5 py-5 lg:grid-cols-[1.1fr_0.9fr] lg:px-6">
+            <section className="flex flex-col overflow-hidden rounded-[30px] border border-[color:var(--line-strong)] bg-[color:rgba(8,28,39,0.84)]">
+              <div className="order-3 grid gap-4 border-t border-[color:var(--line-soft)] px-5 py-5 lg:grid-cols-[1.1fr_0.9fr] lg:px-6">
                 <div>
                   <div className="text-[11px] uppercase tracking-[0.34em] text-[color:var(--ink-muted)]">Selected dossier</div>
                   <div className="mt-3 flex flex-wrap items-end gap-3">
@@ -1286,7 +1245,7 @@ export default function PortsPage() {
                 </div>
               </div>
 
-              <div className="h-[350px] overflow-hidden px-4 py-4 lg:px-5">
+              <div className="order-2 h-[350px] overflow-hidden px-4 py-4 lg:px-5">
                 <PortsMap
                   entries={mapEntries}
                   highlightedPorts={highlightedPorts}
@@ -1308,9 +1267,56 @@ export default function PortsPage() {
                   }}
                 />
               </div>
+
+              <div className="order-1 bg-[color:rgba(8,24,33,0.82)] p-5">
+                <div className="text-[11px] uppercase tracking-[0.28em] text-[color:var(--ink-muted)]">AI Analyst</div>
+                <div className="mt-2 max-w-2xl text-sm leading-7 text-[color:var(--ink-soft)]">
+                  Ask about draft margins, berth restrictions, density assumptions, or compare sources for the selected port and its terminals.
+                </div>
+                <div className="mt-5">
+                  <AIAssistant
+                    ports={ports.map((port) => ({
+                      id: port.id,
+                      name: port.name,
+                      country: port.country,
+                    }))}
+                    initialPortId={selectedPortId}
+                    onHighlightPorts={setHighlightedPorts}
+                    onOpenPort={(portName, portCountry) => {
+                      const matched = ports.find(
+                        (port) =>
+                          port.name.toLowerCase() === portName.toLowerCase() &&
+                          (!portCountry || (port.country ?? "").toLowerCase() === portCountry.toLowerCase())
+                      ) ?? ports.find(
+                        (port) => port.name.toLowerCase() === portName.toLowerCase()
+                      );
+                      if (matched) {
+                        setSelectedPortId(matched.id);
+                        setSelectedTerminalName(null);
+                        setSelectedBerthName(null);
+                      }
+                    }}
+                    onOpenLocation={({ portName, portCountry, terminalName, berthName }) => {
+                      const matched = ports.find(
+                        (port) =>
+                          port.name.toLowerCase() === portName.toLowerCase() &&
+                          (!portCountry || (port.country ?? "").toLowerCase() === portCountry.toLowerCase())
+                      ) ?? ports.find(
+                        (port) => port.name.toLowerCase() === portName.toLowerCase()
+                      );
+                      if (!matched) return;
+                      setSelectedPortId(matched.id);
+                      setSelectedTerminalName(terminalName ?? null);
+                      setSelectedBerthName(berthName ?? null);
+                    }}
+                  />
+                </div>
+              </div>
             </section>
 
-            <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+            <section className="grid gap-4 xl:grid-cols-[0.85fr_0.95fr_1.2fr]">
+              {renderNavigatorPanel()}
+
               <div className="rounded-[28px] border border-[color:var(--line-strong)] bg-[color:rgba(8,24,33,0.82)] p-5">
                 <div className="flex items-center justify-between gap-3">
                   <div>

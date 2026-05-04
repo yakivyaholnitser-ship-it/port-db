@@ -1,11 +1,15 @@
 type GeocodedCoordinates = {
   lat: number;
   lon: number;
+  country?: string | null;
 };
 
 type NominatimResult = {
   lat?: string;
   lon?: string;
+  address?: {
+    country?: string;
+  };
 };
 
 function toNumber(value: string | undefined) {
@@ -51,6 +55,7 @@ export async function geocodePortCoordinates(args: {
     url.searchParams.set("q", query);
     url.searchParams.set("format", "jsonv2");
     url.searchParams.set("limit", "1");
+    url.searchParams.set("addressdetails", "1");
 
     const response = await fetch(url, {
       headers: {
@@ -71,7 +76,7 @@ export async function geocodePortCoordinates(args: {
     const lon = toNumber(first.lon);
     if (lat == null || lon == null) continue;
 
-    return { lat, lon } satisfies GeocodedCoordinates;
+    return { lat, lon, country: first.address?.country ?? null } satisfies GeocodedCoordinates;
   }
 
   return null;

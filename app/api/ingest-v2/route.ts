@@ -136,8 +136,16 @@ const COUNTRY_ALIASES: Array<{ canonical: string; patterns: RegExp[] }> = [
     patterns: [/\bindia\b/i],
   },
   {
+    canonical: "Indonesia",
+    patterns: [/\bindonesia\b/i],
+  },
+  {
     canonical: "Qatar",
     patterns: [/\bqatar\b/i],
+  },
+  {
+    canonical: "Thailand",
+    patterns: [/\bthailand\b/i],
   },
   {
     canonical: "South Africa",
@@ -191,8 +199,16 @@ function normalizeCountryName(value: string | null | undefined): string | null {
     return "India";
   }
 
+  if (normalized === "indonesia") {
+    return "Indonesia";
+  }
+
   if (normalized === "qatar") {
     return "Qatar";
+  }
+
+  if (normalized === "thailand") {
+    return "Thailand";
   }
 
   if (normalized === "south africa") {
@@ -212,9 +228,9 @@ function inferCountryFromText(text: string, extractedCountry: string | null): st
     }
   }
 
-  const regionCodeMatches = Array.from(text.matchAll(/(?:^|[,\s(])([A-Z]{2})(?:$|[,\s)])/g)).map(
-    (match) => match[1]
-  );
+  const regionCodeMatches = Array.from(
+    text.matchAll(/(?:,\s*|\b)([A-Z]{2})(?=(?:\s*,|\s*$|\s+(?:USA|U\.S\.A\.?|United States|Canada)\b))/g)
+  ).map((match) => match[1]);
 
   if (regionCodeMatches.some((code) => US_REGION_CODES.has(code))) {
     return "USA";
@@ -230,6 +246,10 @@ function inferCountryFromText(text: string, extractedCountry: string | null): st
 
   if (/\bbritish columbia\b/i.test(text) || /\bbc,?\s+canada\b/i.test(text)) {
     return "Canada";
+  }
+
+  if (/\bsiam commercial seaport\b|\bsiam seaport\b|\blaem chabang\b|\bsriracha\b|\bchon\s*buri\b|\bchonburi\b/i.test(text)) {
+    return "Thailand";
   }
 
   return null;
@@ -588,6 +608,7 @@ export async function POST(req: NextRequest) {
         : null;
     const resolvedLat = extractedLat ?? geocodedCoordinates?.lat ?? null;
     const resolvedLon = extractedLon ?? geocodedCoordinates?.lon ?? null;
+    const resolvedCountry = country ?? normalizeCountryName(geocodedCoordinates?.country);
 
     const port = existingPort
       ? await prisma.port.update({
@@ -595,7 +616,7 @@ export async function POST(req: NextRequest) {
           data: {
             name: existingPort.name || portName,
             normalizedName: portKey,
-            country: existingPort.country ?? country,
+            country: existingPort.country ?? resolvedCountry,
             lat: existingPort.lat ?? resolvedLat,
             lon: existingPort.lon ?? resolvedLon,
           },
@@ -604,7 +625,7 @@ export async function POST(req: NextRequest) {
           data: {
             name: portName,
             normalizedName: portKey,
-            country,
+            country: resolvedCountry,
             lat: resolvedLat,
             lon: resolvedLon,
           },

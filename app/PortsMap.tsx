@@ -56,12 +56,13 @@ export default function PortsMap({
   const groupMap = new Map<string, PortGroup>();
 
   for (const e of entries) {
-    const key = e.port.toLowerCase();
+    const key = `${e.id}:${e.port.toLowerCase()}:${(e.country ?? "").toLowerCase()}`;
+    const portKey = e.port.toLowerCase();
     if (!groupMap.has(key)) {
       if (typeof e.lat === "number" && typeof e.lon === "number") {
         groupMap.set(key, {
           id: e.id,
-          portKey: key,
+          portKey,
           port: e.port,
           country: e.country,
           lat: e.lat,
@@ -71,7 +72,7 @@ export default function PortsMap({
       } else {
         groupMap.set(key, {
           id: e.id,
-          portKey: key,
+          portKey,
           port: e.port,
           country: e.country,
           lat: NaN,
@@ -130,20 +131,21 @@ export default function PortsMap({
           {groups.map((g) => {
             const isHighlighted = highlighted.has(g.portKey);
             const isSelectedPort = selectedPortId === g.id;
+            const isActive = isHighlighted || isSelectedPort;
 
             return (
               <CircleMarker
-                key={g.portKey}
+                key={g.id}
                 center={[g.lat, g.lon]}
                 eventHandlers={{
                   click: () => onSelectPort(g.id),
                 }}
-                radius={isHighlighted ? 9 : 6}
+                radius={isActive ? 9 : 6}
                 pathOptions={{
-                  color: isHighlighted ? "#10b981" : "#94a3b8",
-                  fillColor: isHighlighted ? "#10b981" : "#94a3b8",
-                  fillOpacity: isHighlighted ? 0.9 : 0.6,
-                  weight: isHighlighted ? 3 : 1,
+                  color: isActive ? "#10b981" : "#94a3b8",
+                  fillColor: isActive ? "#10b981" : "#94a3b8",
+                  fillOpacity: isActive ? 0.9 : 0.6,
+                  weight: isActive ? 3 : 1,
                 }}
               >
                 <Popup>
@@ -292,7 +294,7 @@ export default function PortsMap({
       </div>
 
       <div className="text-xs text-slate-400">
-        Green markers = ports highlighted by the AI Assistant response.
+        Green markers = selected port or ports highlighted by the AI Assistant response.
       </div>
     </section>
   );
