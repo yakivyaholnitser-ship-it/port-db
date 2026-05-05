@@ -575,19 +575,16 @@ Use this exact evidence-first structure:
                 key={`${category.title}-${categoryIndex}`}
                 className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 shadow-[0_16px_40px_rgba(2,6,23,0.22)]"
               >
-                <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-200">
+                <div className="border-b border-slate-800/80 pb-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-100">
                     {category.title}
                   </h3>
-                  <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] text-slate-400">
-                    {category.observedValues.length} {category.observedValues.length === 1 ? "value" : "values"}
-                  </span>
                 </div>
 
                 {category.observedValues.length ? (
                   <div className="mt-3">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
-                      Observed Values
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-emerald-200/70">
+                      Mention Counts
                     </div>
                     <div className="mt-2 space-y-1.5">
                       {category.observedValues.map((value, index) => (
@@ -597,12 +594,12 @@ Use this exact evidence-first structure:
                           return (
                             <div
                               key={`${category.title}-${categoryIndex}-value-${index}`}
-                              className="flex items-start justify-between gap-3 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-slate-100"
+                              className="flex items-start justify-between gap-3 rounded-lg border border-emerald-400/15 bg-emerald-400/[0.04] px-3 py-2 text-slate-100"
                             >
-                              <span>{mentionCount?.label ?? value}</span>
+                              <span className="font-medium">{mentionCount?.label ?? value}</span>
                               {mentionCount ? (
-                                <span className="shrink-0 rounded-full border border-emerald-300/30 bg-emerald-300/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-100">
-                                  <span className="text-sm text-white">{mentionCount.count}</span>{" "}
+                                <span className="shrink-0 rounded-full border border-emerald-300/40 bg-emerald-300/15 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-50 shadow-[0_0_18px_rgba(110,231,183,0.10)]">
+                                  <span className="text-base leading-none text-white">{mentionCount.count}</span>{" "}
                                   {mentionCount.suffix}
                                 </span>
                               ) : null}
@@ -617,7 +614,7 @@ Use this exact evidence-first structure:
                 {category.latestMentions.length ? (
                   <div className="mt-3">
                     <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
-                      Latest Evidence
+                      Latest 5 Mentions
                     </div>
                     <div className="mt-2 space-y-1.5">
                       {category.latestMentions.map((mention, index) => (
