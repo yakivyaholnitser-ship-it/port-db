@@ -549,6 +549,7 @@ function summaryCategoryLabel(categoryKey: string) {
     ["bunker", "Bunkering"],
     ["cleaning", "Cleaning"],
     ["sulphur", "Sulphur"],
+    ["fresh_water", "Fresh Water"],
     ["survey", "Survey"],
     ["transit", "Transit"],
     ["restriction", "Operational Notes"],
@@ -579,6 +580,7 @@ function summaryCategoryOrder(categoryKey: string) {
     "bunker",
     "cleaning",
     "sulphur",
+    "fresh_water",
     "survey",
     "transit",
     "other",
@@ -681,6 +683,25 @@ function summaryDisplayValueForCategory(categoryKey: string, fact: FactForFilter
   return factRawDisplayValue(fact.value, fact.unit);
 }
 
+function summaryMeaningLabelForFact(categoryKey: string, fact: FactForFilters) {
+  const notes = fact.notes?.replace(/\s+/g, " ").trim();
+  if (!notes) return null;
+
+  const rawValue = factRawDisplayValue(fact.value, fact.unit).toLowerCase();
+  const displayValue = summaryDisplayValueForCategory(categoryKey, fact).toLowerCase();
+  const normalizedNotes = notes.toLowerCase();
+  if (normalizedNotes === rawValue || normalizedNotes === displayValue) return null;
+  if (displayValue.length > 8 && normalizedNotes.includes(displayValue)) return null;
+
+  return notes.length > 96 ? `${notes.slice(0, 93).trim()}...` : notes;
+}
+
+function summaryCountLabelForCategory(categoryKey: string, fact: FactForFilters) {
+  const displayValue = summaryDisplayValueForCategory(categoryKey, fact);
+  const meaning = summaryMeaningLabelForFact(categoryKey, fact);
+  return meaning ? `${displayValue} (${meaning})` : displayValue;
+}
+
 function dedupeSummaryFacts(args: {
   portName: string;
   query: ParsedSummaryContext;
@@ -777,7 +798,7 @@ function buildSummaryOverviewAnswer(args: {
     });
 
     for (const fact of sortedFacts) {
-      const displayValue = summaryDisplayValueForCategory(categoryKey, fact);
+      const displayValue = summaryCountLabelForCategory(categoryKey, fact);
       if (!countOrder.has(displayValue)) countOrder.set(displayValue, countOrder.size);
       counts.set(displayValue, (counts.get(displayValue) ?? 0) + 1);
     }

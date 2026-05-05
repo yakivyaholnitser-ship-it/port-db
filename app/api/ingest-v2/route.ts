@@ -60,7 +60,8 @@ Rules:
 - Do not confuse "draft survey" with draft restriction. "Draft survey", "shore scale", and cargo quantity determination belong to survey/other, not draft.
 - Do not confuse WLTHC, topping height, hatch topping measurements, or grain-capacity topping limits with UKC. Those belong to hatch_height / restriction, not under-keel clearance.
 - Do not store bunker fuel sulphur or bunker fuel specification as category "bunker". Bunkering place/location belongs to "bunker"; sulphur limit or fuel spec belongs to "sulphur".
-- Valid categories include: draft, density, discharge_rate, load_rate, tide, equipment, gangs, shifts, cargo, restriction, customs, bunker, cleaning, survey, ukc, hatch_height, freeboard, trim, loa, beam, dwt, air_draft, production, sulphur, transit, distance_ps_to_anchorage, distance_ps_to_berth, cost, other.
+- Fresh water supply, fresh water availability, or fresh water rate belongs to "fresh_water" or "cost", not "bunker".
+- Valid categories include: draft, density, discharge_rate, load_rate, tide, equipment, gangs, shifts, cargo, restriction, customs, bunker, cleaning, survey, ukc, hatch_height, freeboard, trim, loa, beam, dwt, air_draft, production, sulphur, transit, distance_ps_to_anchorage, distance_ps_to_berth, cost, fresh_water, other.
 - Capture operationally important details even if they do not fit a standard bucket; use category "other" when needed.
 - Never drop a meaningful operational constraint or note.
 - If the message contains only coordinates/location identity and no operational facts, return an empty facts array.`;
@@ -466,6 +467,24 @@ function normalizeExtractedOperationalFact(fact: ExtractedFact): ExtractedLocati
   const baseValue = fact.value!.trim();
   const baseNotes = fact.notes?.trim() || null;
   const baseRawSnippet = fact.rawSnippet?.trim() || null;
+  const haystack = [baseValue, fact.unit, baseNotes, baseRawSnippet].filter(Boolean).join(" ");
+
+  if (
+    /\bfresh\s*water\b|\bfreshwater\b/i.test(haystack) &&
+    !/\bwater density\b|\bdensity\b/i.test(haystack) &&
+    baseCategory.toLowerCase() !== "cost"
+  ) {
+    return {
+      scope: fact.scope ?? null,
+      terminal: fact.terminal ?? null,
+      berth: fact.berth ?? null,
+      category: "fresh_water",
+      value: baseValue,
+      unit: fact.unit?.trim() || null,
+      notes: baseNotes,
+      rawSnippet: baseRawSnippet,
+    };
+  }
 
   if (baseCategory.toLowerCase() === "bunker") {
     const normalized = normalizeBunkerFact({

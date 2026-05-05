@@ -39,6 +39,103 @@ type Message = {
   }[];
 };
 
+const ENABLE_SUMMARY_OVERVIEW_CARDS = true;
+
+type SummaryCategory = {
+  title: string;
+  observedValues: string[];
+  latestMentions: string[];
+  note: string | null;
+};
+
+type ParsedSummaryOverview = {
+  title: string;
+  introLines: string[];
+  categories: SummaryCategory[];
+};
+
+function isSummaryCategoryHeader(line: string) {
+  return /^[A-Z][A-Za-z0-9 /&().-]{1,48}:$/.test(line.trim()) && !line.trim().startsWith("-");
+}
+
+function splitMentionCount(line: string) {
+  const match = line.match(/^(.*?)(?:\s+—\s+)(\d+)\s+(mention|mentions)$/i);
+  if (!match) return null;
+
+  return {
+    label: match[1] ?? "",
+    count: match[2] ?? "",
+    suffix: match[3] ?? "mentions",
+  };
+}
+
+function parseSummaryOverview(content: string): ParsedSummaryOverview | null {
+  if (!ENABLE_SUMMARY_OVERVIEW_CARDS) return null;
+
+  const lines = content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const title = lines[0] ?? "";
+  if (!/^Summary overview for\b/i.test(title)) return null;
+
+  const introLines: string[] = [];
+  const categories: SummaryCategory[] = [];
+  let current: SummaryCategory | null = null;
+  let mode: "observed" | "latest" = "observed";
+
+  for (const line of lines.slice(1)) {
+    if (/^Latest 5 mentions:?$/i.test(line)) {
+      mode = "latest";
+      continue;
+    }
+
+    if (isSummaryCategoryHeader(line)) {
+      current = {
+        title: line.replace(/:$/, ""),
+        observedValues: [],
+        latestMentions: [],
+        note: null,
+      };
+      categories.push(current);
+      mode = "observed";
+      continue;
+    }
+
+    if (!current) {
+      introLines.push(line);
+      continue;
+    }
+
+    if (/^Evidence note:/i.test(line)) {
+      current.note = line.replace(/^Evidence note:\s*/i, "");
+      continue;
+    }
+
+    if (line.startsWith("- ")) {
+      if (mode === "latest") current.latestMentions.push(line.slice(2));
+      else current.observedValues.push(line.slice(2));
+      continue;
+    }
+
+    if (mode === "latest") current.latestMentions.push(line);
+    else current.observedValues.push(line);
+  }
+
+  const meaningfulCategories = categories.filter(
+    (category) => category.observedValues.length || category.latestMentions.length || category.note
+  );
+
+  if (!meaningfulCategories.length) return null;
+
+  return {
+    title,
+    introLines,
+    categories: meaningfulCategories,
+  };
+}
+
 function contextLabel(args: {
   port: PortOption | null;
   terminalName: string | null;
@@ -450,6 +547,178 @@ Use this exact evidence-first structure:
     );
   }
 
+  function renderAssistantContent(message: Message) {
+    const parsedSummary = parseSummaryOverview(message.content);
+
+    if (parsedSummary) {
+      return (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/5 px-3 py-2">
+            <div className="text-[10px] uppercase tracking-[0.22em] text-emerald-200/70">
+              Summary Overview
+            </div>
+            <div className="mt-1 text-sm font-semibold text-slate-50">
+              {parsedSummary.title.replace(/^Summary overview for\s*/i, "").replace(/:$/, "")}
+            </div>
+            {parsedSummary.introLines.length ? (
+              <div className="mt-2 space-y-1 text-xs text-slate-400">
+                {parsedSummary.introLines.map((line, index) => (
+                  <div key={`${line}-${index}`}>{line}</div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            {parsedSummary.categories.map((category, categoryIndex) => (
+              <div
+                key={`${category.title}-${categoryIndex}`}
+                className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 shadow-[0_16px_40px_rgba(2,6,23,0.22)]"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-[11px] font-semibold uppercase tracking-[0.22em] text-emerald-200">
+                    {category.title}
+                  </h3>
+                  <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] text-slate-400">
+                    {category.observedValues.length} {category.observedValues.length === 1 ? "value" : "values"}
+                  </span>
+                </div>
+
+                {category.observedValues.length ? (
+                  <div className="mt-3">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                      Observed Values
+                    </div>
+                    <div className="mt-2 space-y-1.5">
+                      {category.observedValues.map((value, index) => (
+                        (() => {
+                          const mentionCount = splitMentionCount(value);
+
+                          return (
+                            <div
+                              key={`${category.title}-${categoryIndex}-value-${index}`}
+                              className="flex items-start justify-between gap-3 rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2 text-slate-100"
+                            >
+                              <span>{mentionCount?.label ?? value}</span>
+                              {mentionCount ? (
+                                <span className="shrink-0 rounded-full border border-emerald-300/30 bg-emerald-300/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-100">
+                                  <span className="text-sm text-white">{mentionCount.count}</span>{" "}
+                                  {mentionCount.suffix}
+                                </span>
+                              ) : null}
+                            </div>
+                          );
+                        })()
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {category.latestMentions.length ? (
+                  <div className="mt-3">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                      Latest Evidence
+                    </div>
+                    <div className="mt-2 space-y-1.5">
+                      {category.latestMentions.map((mention, index) => (
+                        <div
+                          key={`${category.title}-${categoryIndex}-latest-${index}`}
+                          className="rounded-lg border border-slate-800/80 bg-slate-950/40 px-3 py-2 text-slate-300"
+                        >
+                          {mention}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {category.note ? (
+                  <div className="mt-3 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-100/90">
+                    {category.note}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    const groupedLocations = groupLocationsByPort(message.matchedLocations ?? []);
+
+    return (
+      <div className="space-y-1">
+        {message.content.split("\n").map((line, i) => {
+          const inlineGroup = portGroupForLine(line, groupedLocations);
+          const inlineLocation = locationMatchForLine(line, message.matchedLocations ?? []);
+
+          if (line.startsWith("⚠️")) {
+            return (
+              <div key={i} className="bg-yellow-950/40 border border-yellow-600/50 rounded px-3 py-2">
+                {line}
+              </div>
+            );
+          }
+          if (line.startsWith("•")) {
+            return <div key={i} className="pl-4">{line}</div>;
+          }
+          if (line.startsWith("→")) {
+            return <div key={i} className="text-emerald-400">{line}</div>;
+          }
+
+          return (
+            <div key={i} className="group space-y-2">
+              <div>{line}</div>
+              {inlineGroup ? (
+                <div className="flex max-h-0 flex-wrap items-center gap-2 overflow-hidden pl-2 opacity-0 transition-all duration-150 group-hover:max-h-40 group-hover:opacity-100">
+                  <button
+                    type="button"
+                    onClick={() => onOpenPort(inlineGroup.portName, inlineGroup.portCountry)}
+                    className="rounded-full border border-[color:rgba(113,194,183,0.38)] bg-[color:rgba(113,194,183,0.14)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[color:var(--accent-soft)] transition hover:bg-[color:rgba(113,194,183,0.22)]"
+                  >
+                    {inlineGroup.portName}
+                    {inlineGroup.portCountry ? `, ${inlineGroup.portCountry}` : ""}
+                  </button>
+                  {inlineGroup.locations
+                    .filter((location) => location.terminalName || location.berthName)
+                    .map((location, locationIndex) => {
+                      const label = location.berthName
+                        ? `${location.terminalName ?? "Berth"} → ${location.berthName}`
+                        : `${location.terminalName}`;
+
+                      return (
+                        <button
+                          key={`${i}-${inlineGroup.portName}-${locationIndex}-${label}`}
+                          type="button"
+                          onClick={() => onOpenLocation(location)}
+                          className="rounded-full border border-[color:rgba(124,150,196,0.22)] bg-[color:rgba(124,150,196,0.06)] px-2.5 py-1 text-[9px] uppercase tracking-[0.14em] text-[color:#b9c7ef] transition hover:bg-[color:rgba(124,150,196,0.14)]"
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                </div>
+              ) : null}
+              {!inlineGroup && inlineLocation ? (
+                <div className="flex max-h-0 flex-wrap items-center gap-2 overflow-hidden pl-2 opacity-0 transition-all duration-150 group-hover:max-h-20 group-hover:opacity-100">
+                  <button
+                    type="button"
+                    onClick={() => onOpenLocation(inlineLocation)}
+                    className="rounded-full border border-[color:rgba(124,150,196,0.24)] bg-[color:rgba(124,150,196,0.08)] px-2.5 py-1 text-[9px] uppercase tracking-[0.14em] text-[color:#b9c7ef] transition hover:bg-[color:rgba(124,150,196,0.16)]"
+                  >
+                    {inlineLocation.berthName
+                      ? `Open ${inlineLocation.terminalName ?? inlineLocation.portName} → ${inlineLocation.berthName}`
+                      : `Open ${inlineLocation.terminalName ?? inlineLocation.portName}`}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
     <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-4">
       <div className="flex items-center justify-between gap-3">
@@ -551,78 +820,7 @@ Use this exact evidence-first structure:
             {m.role === "user" ? (
               <div className="whitespace-pre-wrap">{m.content}</div>
             ) : (
-              <div className="space-y-1">
-                {(() => {
-                  const groupedLocations = groupLocationsByPort(m.matchedLocations ?? []);
-                  return m.content.split("\n").map((line, i) => {
-                    const inlineGroup = portGroupForLine(line, groupedLocations);
-                    const inlineLocation = locationMatchForLine(line, m.matchedLocations ?? []);
-
-                    if (line.startsWith("⚠️")) {
-                      return (
-                        <div key={i} className="bg-yellow-950/40 border border-yellow-600/50 rounded px-3 py-2">
-                          {line}
-                        </div>
-                      );
-                    }
-                    if (line.startsWith("•")) {
-                      return <div key={i} className="pl-4">{line}</div>;
-                    }
-                    if (line.startsWith("→")) {
-                      return <div key={i} className="text-emerald-400">{line}</div>;
-                    }
-
-                    return (
-                      <div key={i} className="group space-y-2">
-                        <div>{line}</div>
-                        {inlineGroup ? (
-                          <div className="flex max-h-0 flex-wrap items-center gap-2 overflow-hidden pl-2 opacity-0 transition-all duration-150 group-hover:max-h-40 group-hover:opacity-100">
-                            <button
-                              type="button"
-                              onClick={() => onOpenPort(inlineGroup.portName, inlineGroup.portCountry)}
-                              className="rounded-full border border-[color:rgba(113,194,183,0.38)] bg-[color:rgba(113,194,183,0.14)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[color:var(--accent-soft)] transition hover:bg-[color:rgba(113,194,183,0.22)]"
-                            >
-                              {inlineGroup.portName}
-                              {inlineGroup.portCountry ? `, ${inlineGroup.portCountry}` : ""}
-                            </button>
-                            {inlineGroup.locations
-                              .filter((location) => location.terminalName || location.berthName)
-                              .map((location, locationIndex) => {
-                                const label = location.berthName
-                                  ? `${location.terminalName ?? "Berth"} → ${location.berthName}`
-                                  : `${location.terminalName}`;
-
-                                return (
-                                  <button
-                                    key={`${i}-${inlineGroup.portName}-${locationIndex}-${label}`}
-                                    type="button"
-                                    onClick={() => onOpenLocation(location)}
-                                    className="rounded-full border border-[color:rgba(124,150,196,0.22)] bg-[color:rgba(124,150,196,0.06)] px-2.5 py-1 text-[9px] uppercase tracking-[0.14em] text-[color:#b9c7ef] transition hover:bg-[color:rgba(124,150,196,0.14)]"
-                                  >
-                                    {label}
-                                  </button>
-                                );
-                              })}
-                          </div>
-                        ) : null}
-                        {!inlineGroup && inlineLocation ? (
-                          <div className="flex max-h-0 flex-wrap items-center gap-2 overflow-hidden pl-2 opacity-0 transition-all duration-150 group-hover:max-h-20 group-hover:opacity-100">
-                            <button
-                              type="button"
-                              onClick={() => onOpenLocation(inlineLocation)}
-                              className="rounded-full border border-[color:rgba(124,150,196,0.24)] bg-[color:rgba(124,150,196,0.08)] px-2.5 py-1 text-[9px] uppercase tracking-[0.14em] text-[color:#b9c7ef] transition hover:bg-[color:rgba(124,150,196,0.16)]"
-                            >
-                              {inlineLocation.berthName
-                                ? `Open ${inlineLocation.terminalName ?? inlineLocation.portName} → ${inlineLocation.berthName}`
-                                : `Open ${inlineLocation.terminalName ?? inlineLocation.portName}`}
-                            </button>
-                          </div>
-                        ) : null}
-                      </div>
-                    );
-                  });
-                })()}
-              </div>
+              renderAssistantContent(m)
             )}
           </div>
         ))}
