@@ -50,6 +50,7 @@ Rules:
 - If different facts refer to different terminals or berths in the same message, set terminal/berth on each fact individually.
 - If the message contains a table, treat each table row as its own location context and carry that row's berth/terminal across every fact extracted from that row.
 - For row labels like "YARA (South)", "YARA (North)", "West Berth", or "Commercial pier", attach every row-specific draft / DWT / LOA / beam / equipment / rate fact to that exact berth or row location, not just the parent terminal.
+- If a location label lists multiple terminals/berths such as "S3/S4", "S3, S4, S7 and S8", "Berth 208 / 209 / 211", or similar, treat them as separate locations. Facts under a subsection titled "Restrictions (S3/S4)" apply to both S3 and S4 unless a more specific row overrides it.
 - Use the top-level terminal/berth only when the whole message clearly refers to one single location.
 - Short operational updates like "LB212 draft now 16m FW" or "LB214 max draft 12.8m SW" must still be resolved into the correct port/terminal/berth.
 - Preserve compact real-world location IDs like "LB212", "LB214", "G3", "B12" when they are the actual terminal or berth label.
@@ -519,6 +520,159 @@ function normalizeExtractedOperationalFact(fact: ExtractedFact): ExtractedLocati
   };
 }
 
+function looksLikeCompactLocationToken(value: string) {
+  return /[A-Za-zА-Яа-я#]+\s*\d+|\d+\s*[A-Za-zА-Яа-я#]+/.test(value.trim());
+}
+
+function splitGroupedLocationName(value: string | null | undefined) {
+  if (!value?.trim()) return [];
+
+  const raw = value
+    .trim()
+    .replace(/\(([^)]*(?:\/|,|&|\band\b)[^)]*)\)/gi, " $1 ")
+    .replace(/\b(?:berths?|terminals?|piers?|jetties?|wharves?|wharf|quays?)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!/[\/,&]|\band\b/i.test(raw) && !/\s-\s|[A-Za-zА-Яа-я#]\d+\s*-\s*[A-Za-zА-Яа-я#]?\d+/i.test(raw)) {
+    return [];
+  }
+
+  const expanded = raw.replace(
+    /([A-Za-zА-Яа-я#]+\s*\d+|\d+\s*[A-Za-zА-Яа-я#]+)\s*-\s*([A-Za-zА-Яа-я#]+\s*\d+|\d+\s*[A-Za-zА-Яа-я#]+)/g,
+    "$1 / $2"
+  );
+
+  const tokens = expanded
+    .split(/\s*(?:\/|,|&|\band\b)\s*/i)
+    .map((token) => normalizeLocationName(token.replace(/^[()]+|[()]+$/g, "").trim()))
+    .filter(Boolean);
+
+  const uniqueTokens = Array.from(new Set(tokens));
+  if (uniqueTokens.length < 2) return [];
+
+  return uniqueTokens;
+}
+
+function normalizeGroupedLocationFacts(
+  facts: ExtractedLocationFact[],
+  groupedTopLevelLocationNames: string[] = []
+) {
+  const normalizedFacts: ExtractedLocationFact[] = [];
+  const groupedTopLevelKeys = new Set(
+    groupedTopLevelLocationNames.map((name) => canonicalizeLocationKey(name)).filter(Boolean)
+  );
+
+  for (const fact of facts) {
+    const factTerminalKey = fact.terminal ? canonicalizeLocationKey(fact.terminal) : null;
+    const factBerthKey = fact.berth ? canonicalizeLocationKey(fact.berth) : null;
+
+    if (
+      fact.terminal &&
+      !fact.berth &&
+      factTerminalKey &&
+      groupedTopLevelKeys.has(factTerminalKey) &&
+      looksLikeCompactLocationToken(fact.terminal)
+    ) {
+      normalizedFacts.push({
+        ...fact,
+        scope: "berth",
+        terminal: null,
+        berth: fact.terminal,
+        notes: [fact.notes, `Treated grouped top-level location "${fact.terminal}" as a berth/location unit.`]
+          .filter(Boolean)
+          .join(" "),
+      });
+      continue;
+    }
+
+    if (
+      fact.berth &&
+      factBerthKey &&
+      groupedTopLevelKeys.has(factBerthKey) &&
+      fact.terminal &&
+      factTerminalKey &&
+      groupedTopLevelKeys.has(factTerminalKey)
+    ) {
+      normalizedFacts.push({
+        ...fact,
+        scope: "berth",
+        terminal: null,
+        berth: fact.berth,
+        notes: [fact.notes, `Treated grouped top-level location "${fact.berth}" as a berth/location unit.`]
+          .filter(Boolean)
+          .join(" "),
+      });
+      continue;
+    }
+
+    const berthGroup = splitGroupedLocationName(fact.berth);
+    if (berthGroup.length >= 2) {
+      normalizedFacts.push(
+        ...berthGroup.map((berth) => ({
+          ...fact,
+          scope: "berth",
+          berth,
+          notes: [fact.notes, `Applies to grouped berth set: ${fact.berth}`].filter(Boolean).join(" "),
+        }))
+      );
+      continue;
+    }
+
+    const terminalGroup = splitGroupedLocationName(fact.terminal);
+    const category = fact.category.trim().toLowerCase();
+    const haystack = [fact.value, fact.notes, fact.rawSnippet].filter(Boolean).join(" ");
+    const berthLikeGroup =
+      terminalGroup.length >= 2 &&
+      (fact.scope?.toLowerCase() === "berth" ||
+        /\bberths?|piers?|jetties?|wharves?|wharf|quays?\b/i.test(haystack) ||
+        terminalGroup.every(looksLikeCompactLocationToken));
+
+    if (terminalGroup.length >= 2 && berthLikeGroup) {
+      normalizedFacts.push(
+        ...terminalGroup.map((berth) => ({
+          ...fact,
+          scope: "berth",
+          terminal: null,
+          berth,
+          notes: [fact.notes, `Applies to grouped location set: ${fact.terminal}`].filter(Boolean).join(" "),
+        }))
+      );
+      continue;
+    }
+
+    if (terminalGroup.length >= 2 && fact.scope?.toLowerCase() === "terminal") {
+      normalizedFacts.push(
+        ...terminalGroup.map((terminal) => ({
+          ...fact,
+          scope: "terminal",
+          terminal,
+          berth: null,
+          notes: [fact.notes, `Applies to grouped terminal set: ${fact.terminal}`].filter(Boolean).join(" "),
+        }))
+      );
+      continue;
+    }
+
+    if (terminalGroup.length >= 2 && ["draft", "density", "loa", "beam", "dwt", "air_draft", "restriction"].includes(category)) {
+      normalizedFacts.push(
+        ...terminalGroup.map((berth) => ({
+          ...fact,
+          scope: "berth",
+          terminal: null,
+          berth,
+          notes: [fact.notes, `Applies to grouped location set: ${fact.terminal}`].filter(Boolean).join(" "),
+        }))
+      );
+      continue;
+    }
+
+    normalizedFacts.push(fact);
+  }
+
+  return normalizedFacts;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -563,6 +717,18 @@ export async function POST(req: NextRequest) {
     });
     terminalName = promotedTopLevelLocation.terminalName;
     berthName = promotedTopLevelLocation.berthName;
+
+    const groupedTopLevelLocationNames = [
+      ...splitGroupedLocationName(terminalName),
+      ...splitGroupedLocationName(berthName),
+    ];
+
+    if (!berthName && splitGroupedLocationName(terminalName).length >= 2) {
+      terminalName = null;
+    }
+    if (splitGroupedLocationName(berthName).length >= 2) {
+      berthName = null;
+    }
 
     if (!portName) {
       return NextResponse.json({ error: "Could not extract port name" }, { status: 422 });
@@ -677,6 +843,7 @@ export async function POST(req: NextRequest) {
           )
           .map((fact) => normalizeExtractedOperationalFact(fact))
       : [];
+    const locationNormalizedFacts = normalizeGroupedLocationFacts(facts, groupedTopLevelLocationNames);
 
     const locationResolution = await resolveLocationIntelligence({
       db: prisma,
@@ -684,7 +851,7 @@ export async function POST(req: NextRequest) {
       port,
       topLevelTerminalName: terminalName,
       topLevelBerthName: berthName,
-      facts,
+      facts: locationNormalizedFacts,
       lat: resolvedLat,
       lon: resolvedLon,
     });
@@ -775,7 +942,7 @@ export async function POST(req: NextRequest) {
       berth: locationResolution.defaultBerth
         ? { id: locationResolution.defaultBerth.id, name: locationResolution.defaultBerth.name }
         : null,
-      factsAdded: facts.length,
+      factsAdded: locationNormalizedFacts.length,
     });
   } catch (err) {
     console.error("ingest-v2 error:", err);

@@ -190,6 +190,12 @@ function compactTerminalCodeVariants(left: string, right: string) {
   return Array.from(new Set([a, b].filter(Boolean)));
 }
 
+function isAtomicCompactLocationCode(value: string | null | undefined) {
+  if (!value?.trim()) return false;
+  const key = canonicalizeLocationKey(value).replace(/\s+/g, "");
+  return /^[a-z]{1,6}\d{1,4}[a-z]?$/i.test(key) || /^\d{1,4}[a-z]{1,4}$/i.test(key);
+}
+
 function findBestExistingBerth<
   T extends { id: number; normalizedName: string; aliases?: { normalizedName: string }[]; name: string }
 >(rawName: string, berths: T[]) {
@@ -569,6 +575,18 @@ export async function mapToExistingHierarchyWithAI(args: {
     }
   }
 
+  if (
+    (rawTerminalName && isAtomicCompactLocationCode(rawTerminalName)) ||
+    (rawBerthName && isAtomicCompactLocationCode(rawBerthName))
+  ) {
+    return {
+      terminalName: rawTerminalName,
+      berthName: rawBerthName,
+      confidence: MATCH_CONFIDENCE.HIGH,
+      reason: "Compact location code did not exactly match an existing entity, so it should remain a separate location.",
+    } satisfies LocationHierarchyAdjudication;
+  }
+
   const prompt = `You are mapping shorthand maritime location names to the existing canonical hierarchy for one port.
 
 Port: ${args.portName}
@@ -788,6 +806,39 @@ export async function resolveTerminal(args: {
     };
   }
 
+  if (isAtomicCompactLocationCode(terminalName)) {
+    const terminal = await args.db.terminal.create({
+      data: {
+        portId: args.portId,
+        name: terminalName,
+        normalizedName,
+        lat: args.lat ?? null,
+        lon: args.lon ?? null,
+      },
+    });
+
+    await upsertTerminalAlias(args.db, {
+      terminalId: terminal.id,
+      name: terminalName,
+      normalizedName,
+    });
+
+    return {
+      terminal,
+      log: {
+        entityType: LOCATION_ENTITY_TYPE.TERMINAL,
+        rawName: terminalName,
+        normalizedName,
+        matchedName: terminal.name,
+        method: LOCATION_MATCH_METHOD.CREATED_NEW,
+        confidence: MATCH_CONFIDENCE.HIGH,
+        status: LOCATION_MATCH_STATUS.CREATED_NEW,
+        reason: "Created a separate terminal for an unmatched compact location code instead of AI-merging it with a neighboring code.",
+        terminalId: terminal.id,
+      },
+    };
+  }
+
   const ai = await chooseExistingLocationWithAI({
     client: args.client,
     kind: "terminal",
@@ -968,6 +1019,40 @@ export async function resolveBerth(args: {
             ? LOCATION_MATCH_STATUS.NEEDS_REVIEW
             : LOCATION_MATCH_STATUS.MATCHED,
         reason: `Fuzzy berth match with score ${fuzzy.score.toFixed(2)}.`,
+        berthId: berth.id,
+      },
+    };
+  }
+
+  if (isAtomicCompactLocationCode(berthName)) {
+    const berth = await args.db.berth.create({
+      data: {
+        portId: args.portId,
+        terminalId: args.terminalId ?? null,
+        name: berthName,
+        normalizedName,
+        lat: args.lat ?? null,
+        lon: args.lon ?? null,
+      },
+    });
+
+    await upsertBerthAlias(args.db, {
+      berthId: berth.id,
+      name: berthName,
+      normalizedName,
+    });
+
+    return {
+      berth,
+      log: {
+        entityType: LOCATION_ENTITY_TYPE.BERTH,
+        rawName: berthName,
+        normalizedName,
+        matchedName: berth.name,
+        method: LOCATION_MATCH_METHOD.CREATED_NEW,
+        confidence: MATCH_CONFIDENCE.HIGH,
+        status: LOCATION_MATCH_STATUS.CREATED_NEW,
+        reason: "Created a separate berth for an unmatched compact location code instead of AI-merging it with a neighboring code.",
         berthId: berth.id,
       },
     };

@@ -54,8 +54,25 @@ type ParsedSummaryOverview = {
   categories: SummaryCategory[];
 };
 
-function isSummaryCategoryHeader(line: string) {
-  return /^[A-Z][A-Za-z0-9 /&().-]{1,48}:$/.test(line.trim()) && !line.trim().startsWith("-");
+function summaryCategoryTitle(line: string) {
+  const cleaned = line
+    .trim()
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^\d+\.\s+/, "")
+    .replace(/^\*\*(.*)\*\*$/, "$1")
+    .replace(/\*\*/g, "")
+    .trim();
+
+  if (/^Latest 5 mentions:?$/i.test(cleaned) || /^Evidence note:/i.test(cleaned)) {
+    return null;
+  }
+
+  if (!cleaned.endsWith(":")) return null;
+
+  const title = cleaned.replace(/:$/, "").trim();
+  if (!title || title.length > 60 || title.startsWith("-")) return null;
+
+  return title;
 }
 
 function splitMentionCount(line: string) {
@@ -66,6 +83,21 @@ function splitMentionCount(line: string) {
     label: match[1] ?? "",
     count: match[2] ?? "",
     suffix: match[3] ?? "mentions",
+  };
+}
+
+function summaryCategoryStats(category: SummaryCategory) {
+  const totalMentions = category.observedValues.reduce((sum, value) => {
+    const mentionCount = splitMentionCount(value);
+    return sum + (mentionCount ? Number(mentionCount.count) : 0);
+  }, 0);
+  const latestLine = category.latestMentions[0] ?? "";
+  const latestMatch = latestLine.match(/—\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})$/i);
+
+  return {
+    valueCount: category.observedValues.length,
+    totalMentions,
+    latestDate: latestMatch?.[1] ?? null,
   };
 }
 
@@ -86,14 +118,16 @@ function parseSummaryOverview(content: string): ParsedSummaryOverview | null {
   let mode: "observed" | "latest" = "observed";
 
   for (const line of lines.slice(1)) {
-    if (/^Latest 5 mentions:?$/i.test(line)) {
+    const categoryTitle = summaryCategoryTitle(line);
+
+    if (/^Latest 5 mentions:?$/i.test(line.replace(/\*\*/g, "").trim())) {
       mode = "latest";
       continue;
     }
 
-    if (isSummaryCategoryHeader(line)) {
+    if (categoryTitle) {
       current = {
-        title: line.replace(/:$/, ""),
+        title: categoryTitle,
         observedValues: [],
         latestMentions: [],
         note: null,
@@ -445,9 +479,10 @@ export default function AIAssistant({
     );
   }
 
-  async function ask(questionOverride?: string) {
+  async function ask(questionOverride?: string, displayQuestionOverride?: string) {
     const q = (questionOverride ?? input).trim();
     if (!q) return;
+    const displayQuestion = (displayQuestionOverride ?? q).trim();
 
     setError(null);
     setIsAsking(true);
@@ -455,12 +490,14 @@ export default function AIAssistant({
     const contextualQuestion = shouldUseGlobalScope(q)
       ? `Use the whole database for this question. Do not limit yourself to the currently selected port unless the user explicitly narrows the scope.\n\n${q}`
       : `${buildContextInstruction()}\n\n${q}`;
-    const nextMessages: Message[] = [...messages, { role: "user", content: q }];
+    const nextMessages: Message[] = displayQuestion
+      ? [...messages, { role: "user", content: displayQuestion }]
+      : [...messages];
     setMessages(nextMessages);
 
     try {
       const history = [
-        ...messages.slice(1).map((m) => ({
+        ...nextMessages.slice(1).map((m) => ({
           role: m.role,
           content: m.content,
         })),
@@ -528,8 +565,7 @@ export default function AIAssistant({
             ? `the selected terminal`
             : `the selected port`;
 
-    await ask(
-      `Summary overview for ${scopeLabelText}.
+    const summaryPrompt = `Summary overview for ${scopeLabelText}.
 
 Use this exact evidence-first structure:
 
@@ -543,47 +579,74 @@ Use this exact evidence-first structure:
 5. Do not lead with a narrative paragraph.
 6. Do not hide repeated values behind wording like "varies" when exact counts can be shown.
 7. For draft/density/air draft/LOA/beam/DWT/rates/gangs/shifts, count the actual observed values and show the counts directly.
-8. If a category has only one observation, still include it briefly instead of skipping it.`
-    );
+8. If a category has only one observation, still include it briefly instead of skipping it.`;
+
+    await ask(summaryPrompt, `Summary overview for ${selectedContextLabel}`);
   }
 
   function renderAssistantContent(message: Message) {
     const parsedSummary = parseSummaryOverview(message.content);
 
     if (parsedSummary) {
+      const summarySourceLocation = selectedPort
+        ? {
+            portName: selectedPort.name,
+            portCountry: selectedPort.country ?? undefined,
+            terminalName: assistantTerminalName || undefined,
+            berthName: assistantBerthName || undefined,
+          }
+        : null;
+
+      const openSummarySourceContext = () => {
+        if (!summarySourceLocation) return;
+        if (summarySourceLocation.terminalName || summarySourceLocation.berthName) {
+          onOpenLocation(summarySourceLocation);
+          return;
+        }
+        onOpenPort(summarySourceLocation.portName, summarySourceLocation.portCountry);
+      };
+
       return (
         <div className="space-y-3">
-          <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/5 px-3 py-2">
-            <div className="text-[10px] uppercase tracking-[0.22em] text-emerald-200/70">
-              Summary Overview
-            </div>
-            <div className="mt-1 text-sm font-semibold text-slate-50">
-              {parsedSummary.title.replace(/^Summary overview for\s*/i, "").replace(/:$/, "")}
-            </div>
-            {parsedSummary.introLines.length ? (
-              <div className="mt-2 space-y-1 text-xs text-slate-400">
-                {parsedSummary.introLines.map((line, index) => (
-                  <div key={`${line}-${index}`}>{line}</div>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
           <div className="grid gap-3 lg:grid-cols-2">
             {parsedSummary.categories.map((category, categoryIndex) => (
-              <div
+              <details
                 key={`${category.title}-${categoryIndex}`}
-                className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 shadow-[0_16px_40px_rgba(2,6,23,0.22)]"
+                className="group rounded-xl border border-slate-800 bg-slate-900/70 p-3 shadow-[0_16px_40px_rgba(2,6,23,0.22)]"
               >
-                <div className="border-b border-slate-800/80 pb-2">
-                  <h3 className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-100">
-                    {category.title}
-                  </h3>
-                </div>
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 border-b border-slate-800/80 pb-2 marker:hidden">
+                  {(() => {
+                    const stats = summaryCategoryStats(category);
+
+                    return (
+                      <div className="min-w-0">
+                        <h3 className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-100">
+                          {category.title}
+                        </h3>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2 py-0.5 text-[10px] uppercase tracking-[0.1em] text-slate-400">
+                            {stats.valueCount} {stats.valueCount === 1 ? "value" : "values"}
+                          </span>
+                          {stats.totalMentions > 0 ? (
+                            <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2 py-0.5 text-[10px] uppercase tracking-[0.1em] text-slate-400">
+                              {stats.totalMentions} {stats.totalMentions === 1 ? "mention" : "mentions"}
+                            </span>
+                          ) : null}
+                          {stats.latestDate ? (
+                            <span className="rounded-full border border-slate-700 bg-slate-950/60 px-2 py-0.5 text-[10px] uppercase tracking-[0.1em] text-slate-400">
+                              latest {stats.latestDate}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                  <span className="text-slate-500 transition group-open:rotate-180">⌄</span>
+                </summary>
 
                 {category.observedValues.length ? (
                   <div className="mt-3">
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-emerald-200/70">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
                       Mention Counts
                     </div>
                     <div className="mt-2 space-y-1.5">
@@ -594,12 +657,12 @@ Use this exact evidence-first structure:
                           return (
                             <div
                               key={`${category.title}-${categoryIndex}-value-${index}`}
-                              className="flex items-start justify-between gap-3 rounded-lg border border-emerald-400/15 bg-emerald-400/[0.04] px-3 py-2 text-slate-100"
+                              className="flex items-start justify-between gap-3 rounded-lg border border-slate-800 bg-slate-950/55 px-3 py-2 text-slate-100"
                             >
                               <span className="font-medium">{mentionCount?.label ?? value}</span>
                               {mentionCount ? (
-                                <span className="shrink-0 rounded-full border border-emerald-300/40 bg-emerald-300/15 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-50 shadow-[0_0_18px_rgba(110,231,183,0.10)]">
-                                  <span className="text-base leading-none text-white">{mentionCount.count}</span>{" "}
+                                <span className="shrink-0 rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.1em] text-slate-400">
+                                  <span className="text-xs text-slate-100">{mentionCount.count}</span>{" "}
                                   {mentionCount.suffix}
                                 </span>
                               ) : null}
@@ -620,9 +683,18 @@ Use this exact evidence-first structure:
                       {category.latestMentions.map((mention, index) => (
                         <div
                           key={`${category.title}-${categoryIndex}-latest-${index}`}
-                          className="rounded-lg border border-slate-800/80 bg-slate-950/40 px-3 py-2 text-slate-300"
+                          className="group/latest flex items-start justify-between gap-3 rounded-lg border border-slate-800/80 bg-slate-950/40 px-3 py-2 text-slate-300"
                         >
-                          {mention}
+                          <span>{mention}</span>
+                          {summarySourceLocation ? (
+                            <button
+                              type="button"
+                              onClick={openSummarySourceContext}
+                              className="shrink-0 rounded-full border border-[color:rgba(124,150,196,0.24)] bg-[color:rgba(124,150,196,0.08)] px-2.5 py-1 text-[9px] uppercase tracking-[0.14em] text-[color:#b9c7ef] opacity-0 transition hover:bg-[color:rgba(124,150,196,0.16)] group-hover/latest:opacity-100"
+                            >
+                              Open source context
+                            </button>
+                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -634,7 +706,7 @@ Use this exact evidence-first structure:
                     {category.note}
                   </div>
                 ) : null}
-              </div>
+              </details>
             ))}
           </div>
         </div>
